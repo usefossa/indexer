@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fossa.ag/schemas/metadata/v1.json",
+  "title": "Fossa provider and model metadata v1",
+  "description": "UTF-8 JSON without BOM, at most 32768 bytes and 64 object/array nesting levels, with Unicode scalar strings and finite numbers. Validate the definition selected by the on-chain account kind. Missing schemaVersion means 1. Unknown fields are extensions. See /docs/technical/metadata for semantic and account-binding rules.",
+  "anyOf": [{ "$ref": "#/$defs/provider" }, { "$ref": "#/$defs/model" }],
+  "$defs": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000-\\u001f\\u007f]*\\S[^\\u0000-\\u001f\\u007f]*$" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$" },
+    "httpsUrl": { "type": "string", "maxLength": 2048, "format": "uri", "pattern": "^https://[^/?#@\\s]+(?:[/?][^#\\s]*)?$" },
+    "tokenLimit": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "effortLevel": { "enum": ["none", "thinking", "low", "medium", "high", "xhigh", "max"] },
+    "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+    "probability": { "type": "number", "minimum": 0, "maximum": 1 },
+    "penalty": { "type": "number", "minimum": -2, "maximum": 2 },
+    "modalityList": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z-]{0,31}$" } },
+    "provider": {
+      "type": "object",
+      "required": ["name", "endpoint"],
+      "properties": {
+        "$schema": { "const": "https://fossa.ag/schemas/metadata/v1.json#/$defs/provider" },
+        "schemaVersion": { "const": 1, "default": 1 },
+        "name": { "$ref": "#/$defs/name", "description": "Provider display name." },
+        "endpoint": { "$ref": "#/$defs/httpsUrl", "description": "Full HTTPS URL accepting signed inference requests; no credentials or fragment." },
+        "image": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }], "description": "Optional HTTPS image URL; omission or null means no image." }
+      },
+      "additionalProperties": true,
+      "examples": [{ "$schema": "https://fossa.ag/schemas/metadata/v1.json#/$defs/provider", "schemaVersion": 1, "name": "Example Provider", "endpoint": "https://provider.example.com/v1/chat/completions" }]
+    },
+    "model": {
+      "type": "object",
+      "required": ["id", "name", "modalities", "contextTokens", "outputTokens"],
+      "dependentRequired": { "variants": ["effort"] },
+      "properties": {
+        "$schema": { "const": "https://fossa.ag/schemas/metadata/v1.json#/$defs/model" },
+        "schemaVersion": { "const": 1, "default": 1 },
+        "id": { "$ref": "#/$defs/identifier", "description": "Canonical model identifier; SHA-256 of its exact UTF-8 bytes must equal the on-chain model ID." },
+        "name": { "$ref": "#/$defs/name", "description": "Model display name." },
+        "modalities": {
+          "type": "object", "required": ["input", "output"],
+          "properties": { "input": { "$ref": "#/$defs/modalityList" }, "output": { "$ref": "#/$defs/modalityList" } },
+          "additionalProperties": true,
+          "description": "Declared input/output modalities. A declaration does not imply support in every client or provider."
+        },
+        "contextTokens": { "$ref": "#/$defs/tokenLimit", "description": "Declared context limit in tokens." },
+        "outputTokens": { "$ref": "#/$defs/tokenLimit", "description": "Maximum output tokens per request." },
+        "inputBoundTokens": { "$ref": "#/$defs/tokenLimit", "description": "Maximum conservative input bound; defaults to contextTokens and must not exceed it." },
+        "capabilities": {
+          "type": "object", "required": ["tools", "reasoning"],
+          "properties": { "tools": { "type": "boolean" }, "reasoning": { "type": "boolean" } },
+          "additionalProperties": true,
+          "description": "Defaults to tools=false and reasoning=true when effort is present, otherwise false."
+        },
+        "effort": { "type": "array", "minItems": 1, "maxItems": 7, "uniqueItems": true, "items": { "$ref": "#/$defs/effortLevel" }, "description": "Client effort labels, ordered from least to most effort. Without variants, labels are sent as reasoning_effort values." },
+        "variants": {
+          "type": "array", "minItems": 1, "maxItems": 7,
+          "items": {
+            "type": "object", "required": ["id", "body"],
+            "properties": {
+              "id": { "$ref": "#/$defs/effortLevel" },
+              "body": {
+                "type": "object", "required": ["reasoning_effort"],
+                "properties": {
+                  "reasoning_effort": { "$ref": "#/$defs/effortLevel" },
+                  "temperature": { "$ref": "#/$defs/temperature" },
+                  "top_p": { "$ref": "#/$defs/probability" },
+                  "presence_penalty": { "$ref": "#/$defs/penalty" },
+                  "frequency_penalty": { "$ref": "#/$defs/penalty" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": true
+          },
+          "description": "Variant IDs must equal effort labels in the same order. Bodies map labels to supported request values and sampling defaults; reasoning_effort may differ from the label."
+        },
+        "settings": {
+          "type": "object", "required": ["maxTokens", "temperature", "topP"],
+          "properties": {
+            "maxTokens": { "$ref": "#/$defs/tokenLimit" },
+            "temperature": { "$ref": "#/$defs/temperature" },
+            "topP": { "$ref": "#/$defs/probability" }
+          },
+          "additionalProperties": true,
+          "description": "Optional request defaults. maxTokens must not exceed outputTokens."
+        }
+      },
+      "additionalProperties": true,
+      "examples": [{
+        "$schema": "https://fossa.ag/schemas/metadata/v1.json#/$defs/model",
+        "schemaVersion": 1,
+        "id": "example/text-model-v1",
+        "name": "Example Text Model",
+        "modalities": { "input": ["text"], "output": ["text"] },
+        "contextTokens": 131072,
+        "outputTokens": 8192,
+        "inputBoundTokens": 131072,
+        "capabilities": { "tools": true, "reasoning": true },
+        "effort": ["none", "high"],
+        "variants": [{ "id": "none", "body": { "reasoning_effort": "none" } }, { "id": "high", "body": { "reasoning_effort": "high" } }],
+        "settings": { "maxTokens": 4096, "temperature": 1, "topP": 0.95 }
+      }]
+    }
+  }
+}
