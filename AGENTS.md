@@ -1,6 +1,6 @@
 # indexer
 
-standalone rust protocol indexer and client api. source, tests, build settings and documentation live under `indexer/`. read [documentation](indexer/docs/index.md) before changing protocol or api behavior.
+standalone rust protocol indexer and client api. source, tests and build settings live under `indexer/`. read [documentation](https://fossa.ag/docs/users/self-hosting) before changing protocol or api behavior.
 
 - use compact modules, exact integer accounting and bounded work. preserve canonical account validation, freshness checks and restart recovery.
 - keep inference direct between client and provider. never introduce signing keys, custody, vendor-specific transport dependencies or external service requirements.

@@ -1,1 +1,1 @@
-[Indexer Documentation](indexer/docs/index.md)
+[Indexer Documentation](https://fossa.ag/docs/users/self-hosting)

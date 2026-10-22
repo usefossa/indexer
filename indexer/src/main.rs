@@ -11,7 +11,7 @@ async fn main() {
     if let Some(path) = std::env::args_os().nth(1) {
         if path == "--help" || path == "-h" {
             println!(
-                "fossa-indexer [ENV_FILE]\n\nReads .env by default; existing environment variables take precedence.\nRequired: FOSSA_RPC_URL and FOSSA_WS_URL or FOSSA_GRPC_URL.\nSee docs/index.md and .env.example for settings."
+                "fossa-indexer [ENV_FILE]\n\nReads .env by default; existing environment variables take precedence.\nRequired: FOSSA_RPC_URL and FOSSA_WS_URL or FOSSA_GRPC_URL.\nSee https://fossa.ag/docs/users/self-hosting and .env.example for settings."
             );
             return;
         }
