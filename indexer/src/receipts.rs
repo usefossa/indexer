@@ -191,18 +191,22 @@ async fn discover(app: &App, historical: bool) -> Result<()> {
         tx.commit()?;Ok(())
     }).await
 }
-async fn process(app: &App) -> Result<()> {
+async fn process(app: &App, turn: u8) -> Result<usize> {
     let pending = app
         .db
-        .call(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT signature FROM signatures WHERE done=0 AND next_attempt<=?1 ORDER BY next_attempt,slot DESC LIMIT 32",
-            )?;
-            Ok(statement
-                .query_map([crate::now()], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?)
+        .call(move |conn| {
+            let select = |retry: bool, newest: bool, limit: usize| -> Result<Vec<String>> {
+                let (filter, order) = if retry { ("attempts>0", "next_attempt,slot") }
+                    else { ("attempts=0", if newest { "slot DESC" } else { "slot" }) };
+                let mut statement = conn.prepare(&format!("SELECT signature FROM signatures WHERE done=0 AND next_attempt<=?1 AND {filter} ORDER BY {order} LIMIT ?2"))?;
+                Ok(statement.query_map([crate::now(), limit as u64], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>()?)
+            };
+            let mut pending = select(turn == 1, turn == 0, 32)?;
+            if pending.len() < 32 { pending.extend(select(turn != 1, false, 32 - pending.len())?); }
+            Ok(pending)
         })
         .await?;
+    let count = pending.len();
     let mut work=stream::iter(pending).map(|signature|{let app=app.clone();async move{let result=app.rpc.call("getTransaction",json!([signature,{"encoding":"json","commitment":"finalized","maxSupportedTransactionVersion":0}])).await; (signature,result)}}).buffer_unordered(4);
     while let Some((signature, result)) = work.next().await {
         let tx = match result {
@@ -247,12 +251,15 @@ async fn process(app: &App) -> Result<()> {
             })
             .await?;
     }
-    Ok(())
+    Ok(count)
 }
 async fn retry(app: &App, signature: String) -> Result<()> {
     app.db.call(move|conn|{conn.execute("UPDATE signatures SET next_attempt=?1+min(3600,5*(1<<min(attempts,10))),attempts=attempts+1 WHERE signature=?2",params![crate::now(),signature])?;Ok(())}).await
 }
 pub async fn run(app: App) {
+    tokio::join!(discovery(&app), drain(&app));
+}
+async fn discovery(app: &App) {
     let mut timer = tokio::time::interval(Duration::from_secs(3));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -261,13 +268,34 @@ pub async fn run(app: App) {
             continue;
         }
         for historical in [false, true] {
-            if let Err(error) = discover(&app, historical).await {
+            if let Err(error) = discover(app, historical).await {
                 tracing::warn!(%error,"receipt discovery unavailable");
             }
         }
-        if let Err(error) = process(&app).await {
-            tracing::warn!(%error,"receipt persistence unavailable");
-        }
+    }
+}
+async fn drain(app: &App) {
+    let mut turn = 0;
+    loop {
+        let delay = if !app.index.ready(&app.config).await {
+            Duration::from_secs(1)
+        } else {
+            match process(app, turn).await {
+                Ok(count) => {
+                    turn = (turn + 1) % 3;
+                    if count == 32 {
+                        Duration::from_millis(10)
+                    } else {
+                        Duration::from_millis(500)
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error,"receipt persistence unavailable");
+                    Duration::from_secs(1)
+                }
+            }
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 pub async fn history(app: &App, wallet: &str, provider: bool) -> Result<Value> {

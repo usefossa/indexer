@@ -12,14 +12,66 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+type SnapshotEntry = Arc<tokio::sync::Mutex<Option<(Instant, (u64, u64, u64), Value)>>>;
+#[derive(Default)]
+pub struct Snapshots(tokio::sync::Mutex<HashMap<(String, String), SnapshotEntry>>);
+
+async fn version(app: &App, lane: &str) -> (u64, u64, u64) {
+    let state = app.index.state.read().await;
+    let account = state.accounts.get(lane);
+    (
+        state.floor,
+        account.map_or(0, |r| r.slot),
+        account.map_or(0, |r| r.version),
+    )
+}
 
 pub async fn snapshot(app: &App, session: &Session) -> Result<Value> {
+    let entry = {
+        let mut snapshots = app.wallet_snapshots.0.lock().await;
+        if snapshots.len() >= 4096 {
+            snapshots.retain(|_, entry| Arc::strong_count(entry) > 1);
+        }
+        snapshots
+            .entry((session.wallet.clone(), session.lane.clone()))
+            .or_default()
+            .clone()
+    };
+    let mut cached = entry.lock().await;
+    let current = version(app, &session.lane).await;
+    if let Some((at, previous, value)) = cached.as_ref()
+        && at.elapsed() < Duration::from_millis(500)
+        && *previous == current
+        && value["slot"]
+            .as_u64()
+            .is_some_and(|slot| slot >= current.0.max(current.1))
+    {
+        let mut value = value.clone();
+        value["bookings"] = json!(booking_pool(app, session).await);
+        return Ok(value);
+    }
+    for _ in 0..2 {
+        let current = version(app, &session.lane).await;
+        let value = fetch_snapshot(app, session, current.0.max(current.1)).await?;
+        if current == version(app, &session.lane).await {
+            *cached = Some((Instant::now(), current, value.clone()));
+            return Ok(value);
+        }
+    }
+    Err(Error::unavailable("Wallet snapshot is synchronizing"))
+}
+
+async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Value> {
     let owner = protocol::pubkey(&session.wallet)?;
     let lane = protocol::pubkey(&session.lane)?;
     let source = protocol::associated(&owner, &app.config.mint);
     let vault = protocol::vault(&lane, &app.config);
-    let minimum = app.index.state.read().await.floor;
     let result=app.rpc.call("getMultipleAccounts",json!([[session.wallet,source.to_string(),session.lane],{"encoding":"base64","commitment":app.config.commitment,"minContextSlot":minimum}])).await?;
     let slot = result["context"]["slot"]
         .as_u64()
@@ -81,7 +133,15 @@ pub async fn snapshot(app: &App, session: &Session) -> Result<Value> {
 pub async fn booking_pool(app: &App, session: &Session) -> Vec<Value> {
     let state = app.index.state.read().await;
     let mut bookings = Vec::new();
-    for (id, r) in &state.accounts {
+    for id in state
+        .bookings
+        .get(&(session.wallet.clone(), session.lane.clone()))
+        .into_iter()
+        .flatten()
+    {
+        let Some(r) = state.accounts.get(id) else {
+            continue;
+        };
         let d = &r.data;
         if protocol::kind(d) != Some(Kind::Booking)
             || address(d, 8) != session.wallet
@@ -99,7 +159,23 @@ pub async fn booking_pool(app: &App, session: &Session) -> Vec<Value> {
 pub async fn user_orders(app: &App, wallet: &str, lane: Option<&str>) -> Vec<Value> {
     let s = app.index.state.read().await;
     let mut orders = Vec::new();
-    for (id, r) in &s.accounts {
+    let addresses = if let Some(lane) = lane {
+        s.bookings
+            .get(&(wallet.into(), lane.into()))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    } else {
+        s.bookings
+            .iter()
+            .filter(|((owner, _), _)| owner == wallet)
+            .flat_map(|(_, addresses)| addresses)
+            .collect()
+    };
+    for id in addresses {
+        let Some(r) = s.accounts.get(id) else {
+            continue;
+        };
         let d = &r.data;
         if protocol::kind(d) != Some(Kind::Booking)
             || address(d, 8) != wallet

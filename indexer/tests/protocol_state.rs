@@ -40,6 +40,135 @@ fn booking(config: &fossa_indexer::config::Config, status: u8) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn booking_ownership_index_tracks_replacement_close_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let app = App::new(config.clone()).await.unwrap();
+    let owner = Pubkey::new_from_array([21; 32]).to_string();
+    let lane = Pubkey::new_from_array([22; 32]).to_string();
+    let other = Pubkey::new_from_array([23; 32]).to_string();
+    let id = Pubkey::new_from_array([24; 32]).to_string();
+    let mut data = booking(&config, 5);
+    data[8..40].fill(21);
+    data[192..224].fill(22);
+    let session = fossa_indexer::auth::Session {
+        wallet: owner.clone(),
+        lane: lane.clone(),
+        family: "test".into(),
+        expires: u64::MAX,
+    };
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![
+                (
+                    config.market.to_string(),
+                    record(&config, 10, 0, market(&config)),
+                ),
+                (id.clone(), record(&config, 10, 0, data.clone())),
+            ],
+            Some(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fossa_indexer::api::wallet::booking_pool(&app, &session)
+            .await
+            .len(),
+        1
+    );
+    data[8..40].fill(23);
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(id.clone(), record(&config, 11, 1, data))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        fossa_indexer::api::wallet::booking_pool(&app, &session)
+            .await
+            .is_empty()
+    );
+    let session = fossa_indexer::auth::Session {
+        wallet: other,
+        ..session
+    };
+    assert_eq!(
+        fossa_indexer::api::wallet::booking_pool(&app, &session)
+            .await
+            .len(),
+        1
+    );
+    drop(app);
+    let app = App::new(config.clone()).await.unwrap();
+    assert_eq!(
+        fossa_indexer::api::wallet::booking_pool(&app, &session)
+            .await
+            .len(),
+        1
+    );
+    app.index
+        .apply(&app.db, &config, vec![(id, Record::closed(12, 2))], None)
+        .await
+        .unwrap();
+    assert!(
+        fossa_indexer::api::wallet::booking_pool(&app, &session)
+            .await
+            .is_empty()
+    );
+    assert!(app.index.state.read().await.bookings.is_empty());
+}
+
+#[tokio::test]
+async fn metadata_restore_bounds_total_bytes_without_deleting_persisted_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let app = App::new(config).await.unwrap();
+    let raw =
+        br#"{"name":"Example","endpoint":"https://example.com/v1/chat/completions"}"#.to_vec();
+    let second =
+        br#"{"name":"Second","endpoint":"https://example.com/v1/chat/completions"}"#.to_vec();
+    let budget = raw.len().max(second.len());
+    app.db
+        .call(move |conn| {
+            for raw in [raw, second] {
+                conn.execute(
+                    "INSERT INTO documents VALUES(?1,'provider',?2)",
+                    rusqlite::params![hex::encode(Sha256::digest(&raw)), raw],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let restored = fossa_indexer::metadata::restore(&app.db, 100, budget)
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert!(restored.values().map(|doc| doc.raw.len()).sum::<usize>() <= budget);
+    assert_eq!(
+        app.db
+            .call(|conn| Ok(conn
+                .query_row("SELECT count(*) FROM documents", [], |row| row
+                    .get::<_, usize>(0))?))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        fossa_indexer::metadata::restore(&app.db, 100, budget * 2)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn state_rejects_replay_reconciles_deletes_recovers_and_replaces_at_capacity() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = common::config(dir.path());
@@ -275,8 +404,47 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
         "9007199254740993"
     );
     assert_eq!(catalog.value["models"][0]["offers"][0]["available"], true);
+    let unchanged = app
+        .index
+        .state
+        .read()
+        .await
+        .accounts
+        .iter()
+        .map(|(address, record)| {
+            let mut record = record.clone();
+            record.slot = 11;
+            (address.clone(), record)
+        })
+        .collect();
+    app.index
+        .apply(&app.db, &config, unchanged, Some(11))
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&catalog, &app.index.catalog(&config).await));
+    assert_eq!(app.index.state.read().await.floor, 11);
+    let mut updated = app.index.state.read().await.accounts[&capacity.to_string()].clone();
+    let mut bytes = updated.data.to_vec();
+    bytes[64..68].copy_from_slice(&5u32.to_le_bytes());
+    updated.data = bytes.into();
+    updated.slot = 12;
+    updated.version = 1;
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(capacity.to_string(), updated)],
+            None,
+        )
+        .await
+        .unwrap();
+    let changed = app.index.catalog(&config).await;
+    assert!(!Arc::ptr_eq(&catalog, &changed));
+    assert_eq!(changed.value["models"][0]["offers"][0]["available"], false);
+    assert_eq!(changed.value["models"][0]["offers"][0]["activeBookings"], 5);
     app.index.connected(false).await;
     let catalog = app.index.catalog(&config).await;
+    assert!(!Arc::ptr_eq(&catalog, &changed));
     assert!(!catalog.ready);
     assert_eq!(catalog.value["models"][0]["offers"][0]["available"], false);
     assert!(

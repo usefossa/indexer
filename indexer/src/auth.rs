@@ -15,7 +15,62 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Mutex, time::Instant};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+#[derive(Default)]
+pub struct Connections(Mutex<HashMap<String, usize>>);
+pub struct Connection {
+    limits: Arc<Connections>,
+    keys: Vec<String>,
+}
+impl Connections {
+    pub fn enter(self: &Arc<Self>, wallet: &str, peer: Option<IpAddr>) -> Result<Connection> {
+        let mut keys = vec![(format!("wallet:{wallet}"), 8)];
+        if let Some(peer) = peer.filter(|ip| !ip.is_loopback()) {
+            keys.push((format!("peer:{peer}"), 32));
+        }
+        let mut counts = self.0.lock().map_err(|_| Error::internal())?;
+        if keys
+            .iter()
+            .any(|(key, limit)| counts.get(key).copied().unwrap_or(0) >= *limit)
+        {
+            return Err(Error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Live connection limit reached",
+            ));
+        }
+        let keys = keys
+            .into_iter()
+            .map(|(key, _)| {
+                *counts.entry(key.clone()).or_default() += 1;
+                key
+            })
+            .collect();
+        Ok(Connection {
+            limits: self.clone(),
+            keys,
+        })
+    }
+}
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Ok(mut counts) = self.limits.0.lock() {
+            for key in &self.keys {
+                if let Some(count) = counts.get_mut(key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        counts.remove(key);
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Limits(Mutex<HashMap<String, (Instant, usize)>>);

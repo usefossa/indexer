@@ -47,6 +47,8 @@ impl Db {
             let retry_columns: u32=conn.query_row("SELECT count(*) FROM pragma_table_info('signatures') WHERE name='next_attempt'",[],|row|row.get(0))?;
             if retry_columns==0 {conn.execute_batch("ALTER TABLE signatures ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE signatures ADD COLUMN next_attempt INTEGER NOT NULL DEFAULT 0;")?;}
             conn.execute_batch("CREATE INDEX IF NOT EXISTS signatures_retry ON signatures(done,next_attempt,slot)")?;
+            conn.execute_batch("CREATE INDEX IF NOT EXISTS signatures_fresh_queue ON signatures(slot) WHERE done=0 AND attempts=0;
+                CREATE INDEX IF NOT EXISTS signatures_due_queue ON signatures(next_attempt,slot) WHERE done=0 AND attempts>0;")?;
             Ok(conn)
         }).await.map_err(|_| Error::internal())??;
         Ok(Self {

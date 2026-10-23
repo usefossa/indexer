@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     extract::{
-        State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
         ws::{Message, Utf8Bytes, WebSocket},
     },
     http::{HeaderMap, StatusCode},
@@ -16,15 +16,20 @@ use axum::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     time::{Duration, Instant},
 };
 
 pub async fn upgrade(
     State(app): State<App>,
     headers: HeaderMap,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
-    auth::session(&app, &headers).await?;
+    let session = auth::session(&app, &headers).await?;
+    let identity = app
+        .connections
+        .enter(&session.wallet, peer.map(|peer| peer.0.0.ip()))?;
     let permit = app.sockets.clone().try_acquire_owned().map_err(|_| {
         Error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -36,6 +41,7 @@ pub async fn upgrade(
         .max_frame_size(1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
+            let _identity = identity;
             let _ = stream(app, headers, socket).await;
         }))
 }
@@ -105,9 +111,11 @@ async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<(
     loop {
         tokio::select! {
         _ = shutdown.changed() => return Ok(()),
-            incoming=socket.recv()=>match incoming {
+            incoming=socket.recv()=>{
+                if input_window.elapsed()>=Duration::from_secs(60){input_window=Instant::now();input_count=0;}
+                input_count+=1;if input_count>120{return Err(Error(StatusCode::TOO_MANY_REQUESTS,"Too many live messages"));}
+                match incoming {
                 Some(Ok(Message::Text(text)))=>{
-                    if input_window.elapsed()>=Duration::from_secs(60){input_window=Instant::now();input_count=0;}input_count+=1;if input_count>120{return Err(Error(StatusCode::TOO_MANY_REQUESTS,"Too many watch requests"));}
                     let value:Value=serde_json::from_str(&text)?;
                     if value.as_object().is_none_or(|v|v.len()!=1) {return Err(Error::bad("Use watch or unwatch"));}
                     if let Some(address)=value["watch"].as_str(){protocol::pubkey(address)?;if !watched.contains_key(address)&&watched.len()>=64{return Err(Error::bad("Watch limit reached"));}watched.entry(address.into()).or_insert(None);watches(&app,&mut socket,&mut watched).await?;start_fallback(&app,&watched,&mut fallbacks).await;}
@@ -115,6 +123,7 @@ async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<(
                 },
                 Some(Ok(Message::Ping(bytes)))=>{tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Pong(bytes))).await.map_err(|_|Error::unavailable("Live connection stalled"))?.map_err(|_|Error::unavailable("Live connection closed"))?;},
                 None|Some(Err(_))|Some(Ok(Message::Close(_)))=>return Ok(()),_=>{}
+                }
             },
             change=changes.changed()=>{if change.is_err(){return Ok(());}let catalog=app.index.catalog(&app.config).await;if !std::sync::Arc::ptr_eq(&catalog,&last_catalog){send(&mut socket,catalog.message.clone()).await?;last_catalog=catalog;}watches(&app,&mut socket,&mut watched).await?;},
             change=quotes.changed()=>{if change.is_err(){return Ok(());}let value=quotes.borrow_and_update().clone();send(&mut socket,json!({"type":"chain","data":value}).to_string().into()).await?;},
@@ -154,8 +163,12 @@ async fn start_fallback(
     if addresses.is_empty() {
         return;
     }
+    let Ok(permit) = app.watch_reads.clone().try_acquire_owned() else {
+        return;
+    };
     let app = app.clone();
     tasks.spawn(async move {
+        let _permit = permit;
         let minimum=app.index.state.read().await.floor;
         let result=app.rpc.call("getMultipleAccounts",json!([addresses,{"encoding":"base64","commitment":app.config.commitment,"minContextSlot":minimum}])).await?;
         let slot=result["context"]["slot"].as_u64().filter(|s|*s>=minimum).ok_or(Error::unavailable("Watch snapshot regressed"))?;

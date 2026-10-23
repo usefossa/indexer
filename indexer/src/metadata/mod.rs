@@ -45,10 +45,11 @@ fn verified(kind: schema::Kind, hash: &[u8], raw: Vec<u8>) -> Option<Document> {
         value,
     })
 }
-pub async fn restore(db: &Db, max: usize) -> Result<HashMap<String, Document>> {
+pub async fn restore(db: &Db, max: usize, max_bytes: usize) -> Result<HashMap<String, Document>> {
     db.call(move |conn| {
-        let mut statement = conn.prepare("SELECT hash,kind,body FROM documents LIMIT ?1")?;
-        let rows = statement.query_map([max], |r| {
+        let mut statement =
+            conn.prepare("SELECT hash,kind,body FROM documents WHERE length(body)<=?2 LIMIT ?1")?;
+        let rows = statement.query_map([max, max_bytes.min(schema::MAX_BYTES)], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -56,8 +57,12 @@ pub async fn restore(db: &Db, max: usize) -> Result<HashMap<String, Document>> {
             ))
         })?;
         let mut documents = HashMap::new();
+        let mut bytes = 0usize;
         for row in rows {
             let (hash, kind, raw) = row?;
+            if raw.len() > max_bytes.saturating_sub(bytes) {
+                continue;
+            }
             let kind = match kind.as_str() {
                 "provider" => schema::Kind::Provider,
                 "model" => schema::Kind::Model,
@@ -66,6 +71,7 @@ pub async fn restore(db: &Db, max: usize) -> Result<HashMap<String, Document>> {
             if let Ok(hash) = hex::decode(&hash)
                 && let Some(doc) = verified(kind, &hash, raw)
             {
+                bytes += doc.raw.len();
                 documents.insert(format!("{}:{}", kind.name(), hex::encode(hash)), doc);
             }
         }

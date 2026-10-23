@@ -603,6 +603,51 @@ async fn native_receipts_stream_all_compact_summaries() {
 }
 
 #[tokio::test]
+async fn live_wallet_quota_holds_for_connection_lifetime_and_releases_on_close() {
+    let fixture = Fixture::new().await;
+    let session = fixture.login().await;
+    let mut request = format!("{}/v1/opencode/live", fixture.base.replace("http:", "ws:"))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", session["access"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    let mut sockets = Vec::new();
+    for _ in 0..8 {
+        sockets.push(
+            tokio_tungstenite::connect_async(request.clone())
+                .await
+                .unwrap()
+                .0,
+        );
+    }
+    match tokio_tungstenite::connect_async(request.clone()).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 429)
+        }
+        other => panic!("expected wallet lifetime quota rejection: {other:?}"),
+    }
+    sockets.pop().unwrap().close(None).await.unwrap();
+    let mut replacement = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok((socket, _)) = tokio_tungstenite::connect_async(request.clone()).await {
+                break socket;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    replacement.close(None).await.unwrap();
+    for mut socket in sockets {
+        let _ = socket.close(None).await;
+    }
+}
+
+#[tokio::test]
 async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
     let mut fixture = Fixture::new().await;
     let session = fixture.login().await;

@@ -58,6 +58,7 @@ impl Record {
 }
 pub struct State {
     pub accounts: HashMap<String, Record>,
+    pub bookings: HashMap<(String, String), HashSet<String>>,
     pub documents: HashMap<String, Document>,
     pub slot: u64,
     pub floor: u64,
@@ -66,6 +67,44 @@ pub struct State {
     pub activity: Option<Instant>,
     pub cached: Option<Arc<catalog::Catalog>>,
     pub bytes: usize,
+}
+fn booking_owner(record: &Record) -> Option<(String, String)> {
+    (protocol::kind(&record.data) == Some(Kind::Booking)).then(|| {
+        (
+            protocol::address(&record.data, 8),
+            protocol::address(&record.data, 192),
+        )
+    })
+}
+fn catalog_account(record: &Record) -> bool {
+    matches!(
+        protocol::kind(&record.data),
+        Some(
+            Kind::Market
+                | Kind::Model
+                | Kind::Provider
+                | Kind::Metadata
+                | Kind::Terms
+                | Kind::Capacity
+        )
+    )
+}
+fn track_booking(
+    index: &mut HashMap<(String, String), HashSet<String>>,
+    address: &str,
+    record: &Record,
+    insert: bool,
+) {
+    if let Some(owner) = booking_owner(record) {
+        if insert {
+            index.entry(owner).or_default().insert(address.into());
+        } else if let Some(addresses) = index.get_mut(&owner) {
+            addresses.remove(address);
+            if addresses.is_empty() {
+                index.remove(&owner);
+            }
+        }
+    }
 }
 impl State {
     pub fn ready(&self, config: &Config) -> bool {
@@ -130,15 +169,21 @@ impl Index {
             .await?
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let documents = crate::metadata::restore(db, config.max_accounts).await?;
+        let documents =
+            crate::metadata::restore(db, config.max_accounts, config.max_rpc_bytes).await?;
         let slot = accounts.values().map(|r| r.slot).max().unwrap_or(floor);
         let bytes = accounts.values().map(|r| r.data.len()).sum();
         if bytes > config.max_rpc_bytes {
             return Err(Error::bad("Stored account bytes exceed configured limit"));
         }
+        let mut bookings = HashMap::new();
+        for (address, record) in &accounts {
+            track_booking(&mut bookings, address, record, true);
+        }
         Ok(Self {
             state: Arc::new(RwLock::new(State {
                 accounts,
+                bookings,
                 documents,
                 slot,
                 floor,
@@ -179,6 +224,11 @@ impl Index {
             }
         }
         let mut s = self.state.write().await;
+        if let Some(c) = &s.cached
+            && c.ready == s.ready(config)
+        {
+            return c.clone();
+        }
         let value = Arc::new(catalog::build(&s, config));
         s.cached = Some(value.clone());
         value
@@ -228,15 +278,14 @@ impl Index {
             if record.data.is_empty() && old.is_none() {
                 continue;
             }
-            invalidate |= !matches!(
-                protocol::kind(&record.data).or_else(|| old.and_then(|r| protocol::kind(&r.data))),
-                Some(Kind::Booking | Kind::User | Kind::Unbond | Kind::Receipt)
-            );
+            invalidate |= (catalog_account(&record) || old.is_some_and(catalog_account))
+                && old.is_none_or(|old| old.data != record.data);
             changes.insert(address, record);
         }
         if let Some(slot) = snapshot {
             for (address, record) in &s.accounts {
                 if record.slot <= slot && !present.contains(address) {
+                    invalidate |= catalog_account(record);
                     changes.insert(address.clone(), Record::closed(slot, u64::MAX));
                 }
             }
@@ -249,7 +298,6 @@ impl Index {
                     "Canonical market account missing or mint mismatched",
                 ));
             }
-            invalidate = true;
         }
         let floor = snapshot.unwrap_or(s.floor);
         let mut count = s.accounts.len();
@@ -275,6 +323,10 @@ impl Index {
         s.bytes = bytes;
         for (address, record) in records {
             s.slot = s.slot.max(record.slot);
+            if let Some(previous) = s.accounts.get(&address).cloned() {
+                track_booking(&mut s.bookings, &address, &previous, false);
+            }
+            track_booking(&mut s.bookings, &address, &record, true);
             s.accounts.insert(address, record);
         }
         if let Some(slot) = snapshot {
