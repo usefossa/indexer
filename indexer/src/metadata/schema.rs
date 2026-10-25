@@ -1,6 +1,10 @@
 use serde_json::Value;
 use std::{collections::HashSet, sync::LazyLock};
 
+#[path = "icon.rs"]
+mod icon;
+pub use icon::{MAX_ICON_BYTES, validate_icon};
+
 pub const MAX_BYTES: usize = 32_768;
 pub const MAX_DEPTH: usize = 64;
 pub const SCHEMA: &str = include_str!("schema.json");
@@ -9,6 +13,7 @@ pub const SCHEMA: &str = include_str!("schema.json");
 pub enum Kind {
     Provider,
     Model,
+    List,
 }
 
 impl Kind {
@@ -16,12 +21,13 @@ impl Kind {
         match self {
             Self::Provider => "provider",
             Self::Model => "model",
+            Self::List => "list",
         }
     }
 }
 
-static VALIDATORS: LazyLock<[jsonschema::Validator; 2]> = LazyLock::new(|| {
-    [Kind::Provider, Kind::Model].map(|kind| {
+static VALIDATORS: LazyLock<[jsonschema::Validator; 3]> = LazyLock::new(|| {
+    [Kind::Provider, Kind::Model, Kind::List].map(|kind| {
         let mut schema: Value =
             serde_json::from_str(SCHEMA).expect("valid bundled metadata schema");
         schema.as_object_mut().unwrap().remove("anyOf");
@@ -56,6 +62,7 @@ pub fn validate(kind: Kind, value: &Value) -> Result<(), String> {
     let validator = &VALIDATORS[match kind {
         Kind::Provider => 0,
         Kind::Model => 1,
+        Kind::List => 2,
     }];
     if let Err(error) = validator.validate(value) {
         return Err(format!(
@@ -138,10 +145,11 @@ mod tests {
     fn shared_conformance_cases() {
         let cases: Value = serde_json::from_str(include_str!("fixtures.json")).unwrap();
         for case in cases.as_array().unwrap() {
-            let kind = if case["kind"] == "provider" {
-                Kind::Provider
-            } else {
-                Kind::Model
+            let kind = match case["kind"].as_str().unwrap() {
+                "provider" => Kind::Provider,
+                "model" => Kind::Model,
+                "list" => Kind::List,
+                kind => panic!("unknown fixture kind {kind}"),
             };
             let bytes = case
                 .get("raw")

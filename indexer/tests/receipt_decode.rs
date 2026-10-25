@@ -103,3 +103,54 @@ fn permissionless_claims_preserve_zero_charges_and_reusable_identity_without_buc
         old
     );
 }
+
+#[test]
+fn booking_list_attribution_decodes_only_successful_exact_top_level_reservations() {
+    use fossa_indexer::receipts::decode_bookings;
+    let (mut tx, program, market) = fixture();
+    let mut data = vec![0; 116];
+    data[0] = 6;
+    data[108..116].copy_from_slice(&7u64.to_le_bytes());
+    let instruction = &mut tx["transaction"]["message"]["instructions"][0];
+    instruction["accounts"] = json!([0, 1, 2, 3, 4, 5, 7, 8, 9]);
+    instruction["data"] = bs58::encode(&data).into_string().into();
+    let rows = decode_bookings(&tx, &program, &market);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].generation, "7");
+    assert_eq!(rows[0].list, Pubkey::new_from_array([9; 32]).to_string());
+    assert_eq!(rows[0].booking, Pubkey::new_from_array([7; 32]).to_string());
+    assert!(decode_bookings(&tx, &program, "foreign").is_empty());
+    for generation in [1 << 56, u64::MAX] {
+        let mut tx = tx.clone();
+        let mut invalid = data.clone();
+        invalid[108..116].copy_from_slice(&generation.to_le_bytes());
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(invalid).into_string().into();
+        assert!(decode_bookings(&tx, &program, &market).is_empty());
+    }
+    for length in [0, 107, 109, 115, 117] {
+        let mut tx = tx.clone();
+        let mut invalid = data.clone();
+        invalid.resize(length, 0);
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(invalid).into_string().into();
+        assert!(decode_bookings(&tx, &program, &market).is_empty());
+    }
+    let mut legacy = tx.clone();
+    legacy["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(&data[..108]).into_string().into();
+    assert_eq!(
+        decode_bookings(&legacy, &program, &market)[0].generation,
+        "0"
+    );
+    let mut failed = tx.clone();
+    failed["meta"]["err"] = json!({"InstructionError":[0,"Custom"]});
+    assert!(decode_bookings(&failed, &program, &market).is_empty());
+    let mut cpi = tx.clone();
+    cpi["meta"]["innerInstructions"] =
+        json!([{"index":0,"instructions":cpi["transaction"]["message"]["instructions"]}]);
+    cpi["transaction"]["message"]["instructions"] = json!([]);
+    assert!(decode_bookings(&cpi, &program, &market).is_empty());
+    tx["transaction"]["message"]["instructions"][0]["accounts"][8] = 999.into();
+    assert!(decode_bookings(&tx, &program, &market).is_empty());
+}

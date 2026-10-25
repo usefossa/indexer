@@ -7,9 +7,12 @@ pub mod db;
 pub mod error;
 pub mod index;
 pub mod metadata;
+pub mod one_shot;
+pub mod profiles;
 pub mod protocol;
 pub mod receipts;
 pub mod rpc;
+pub mod usage;
 
 use crate::{config::Config, db::Db, error::Result, index::Index, rpc::Rpc};
 use std::{
@@ -35,6 +38,7 @@ pub struct Inner {
     pub sockets: Arc<Semaphore>,
     pub connections: Arc<auth::Connections>,
     pub watch_reads: Arc<Semaphore>,
+    pub icons: metadata::Icons,
     pub wallet_snapshots: api::wallet::Snapshots,
     pub http_requests: Arc<Semaphore>,
     pub limits: auth::Limits,
@@ -62,6 +66,7 @@ impl App {
             sockets,
             connections: Arc::new(auth::Connections::default()),
             watch_reads: Arc::new(Semaphore::new(8)),
+            icons: metadata::Icons::default(),
             wallet_snapshots: api::wallet::Snapshots::default(),
             http_requests: Arc::new(Semaphore::new(256)),
             limits: auth::Limits::default(),

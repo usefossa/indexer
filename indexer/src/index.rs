@@ -66,6 +66,7 @@ pub struct State {
     pub reconciled: Option<Instant>,
     pub activity: Option<Instant>,
     pub cached: Option<Arc<catalog::Catalog>>,
+    pub directory: std::sync::OnceLock<Arc<crate::profiles::Directory>>,
     pub bytes: usize,
 }
 fn booking_owner(record: &Record) -> Option<(String, String)> {
@@ -87,6 +88,15 @@ fn catalog_account(record: &Record) -> bool {
                 | Kind::Terms
                 | Kind::Capacity
                 | Kind::ProviderList
+                | Kind::ListMetadata
+        )
+    )
+}
+fn directory_account(record: &Record) -> bool {
+    matches!(
+        protocol::kind(&record.data),
+        Some(
+            Kind::Model | Kind::Provider | Kind::Metadata | Kind::ProviderList | Kind::ListMetadata
         )
     )
 }
@@ -199,6 +209,7 @@ impl Index {
                 reconciled: None,
                 activity: None,
                 cached: None,
+                directory: std::sync::OnceLock::new(),
                 bytes,
             })),
             changes: watch::channel(0).0,
@@ -259,6 +270,7 @@ impl Index {
         let mut changes = HashMap::new();
         let mut present = HashSet::new();
         let mut invalidate = false;
+        let mut directory_changed = false;
         for (address, mut record) in updates {
             if record.slot > i64::MAX as u64 {
                 return Err(Error::unavailable("Invalid account slot"));
@@ -286,6 +298,8 @@ impl Index {
             if record.data.is_empty() && old.is_none() {
                 continue;
             }
+            directory_changed |= (directory_account(&record) || old.is_some_and(directory_account))
+                && old.is_none_or(|old| old.data != record.data);
             invalidate |= (catalog_account(&record) || old.is_some_and(catalog_account))
                 && old.is_none_or(|old| old.data != record.data);
             changes.insert(address, record);
@@ -294,6 +308,7 @@ impl Index {
             for (address, record) in &s.accounts {
                 if record.slot <= slot && !present.contains(address) {
                     invalidate |= catalog_account(record);
+                    directory_changed |= directory_account(record);
                     changes.insert(address.clone(), Record::closed(slot, u64::MAX));
                 }
             }
@@ -343,6 +358,9 @@ impl Index {
             s.floor = slot;
             s.slot = s.slot.max(slot);
             s.reconciled = Some(Instant::now());
+        }
+        if directory_changed {
+            s.directory.take();
         }
         if invalidate {
             s.cached = None;

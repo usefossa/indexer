@@ -21,6 +21,7 @@ pub enum Kind {
     User,
     Booking,
     ProviderList,
+    ListMetadata,
 }
 pub fn key(data: &[u8], offset: usize) -> Option<Pubkey> {
     Some(Pubkey::new_from_array(
@@ -98,6 +99,7 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
         b"MODELV20" if data.len() == 144 => Kind::Model,
         b"PROV0V20" if data.len() == 364 => Kind::Provider,
         b"MMETAV20" if data.len() == 396 => Kind::Metadata,
+        b"LMETAV30" if data.len() == 396 => Kind::ListMetadata,
         b"TERMSV20" | b"CAPACV20" if data.len() >= 48 => {
             let terms = data.starts_with(b"TERMS");
             let limit = u32_at(data, 40) as usize;
@@ -166,6 +168,17 @@ pub fn validate(address: &str, data: &[u8], config: &Config) -> Option<Kind> {
                 && pda(
                     &address,
                     &[b"model_metadata", &data[40..72]],
+                    data[138],
+                    &config.program,
+                )
+                && metadata_uri(data, 104, 136, 140).is_some()
+        }
+        Kind::ListMetadata => {
+            key(data, 8)? == config.market
+                && data[139] == 0
+                && pda(
+                    &address,
+                    &[b"list_metadata", &data[40..72]],
                     data[138],
                     &config.program,
                 )

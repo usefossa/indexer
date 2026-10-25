@@ -42,6 +42,19 @@ pub fn router(app: App) -> Router {
         .route("/v1/market/orders", get(wallet::orders))
         .route("/v1/market/profile", get(wallet::profile))
         .route("/v1/market/providers/{wallet}", get(wallet::provider))
+        .route(
+            "/v1/market/providers/{wallet}/profile",
+            get(crate::profiles::provider_profile),
+        )
+        .route("/v1/market/lists", get(crate::profiles::lists))
+        .route(
+            "/v1/market/lists/{address}/profile",
+            get(crate::profiles::list_profile),
+        )
+        .route(
+            "/v1/market/lists/{address}/icon",
+            get(crate::profiles::icon),
+        )
         .fallback(|| async { Error(StatusCode::NOT_FOUND, "Unknown endpoint") })
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(middleware::from_fn_with_state(app.clone(), guard))

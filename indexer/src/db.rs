@@ -40,7 +40,19 @@ impl Db {
                 CREATE TABLE IF NOT EXISTS receipts(id TEXT PRIMARY KEY,owner TEXT NOT NULL,provider TEXT NOT NULL,slot INTEGER NOT NULL,body TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS receipts_owner ON receipts(owner,slot);
                 CREATE INDEX IF NOT EXISTS receipts_owner_id ON receipts(owner,id);
-                CREATE INDEX IF NOT EXISTS receipts_provider ON receipts(provider,slot);")?;
+                CREATE INDEX IF NOT EXISTS receipts_provider ON receipts(provider,slot);
+                CREATE TABLE IF NOT EXISTS booking_lists(booking TEXT NOT NULL,generation TEXT NOT NULL,lane TEXT NOT NULL,list TEXT NOT NULL,owner TEXT NOT NULL,model TEXT NOT NULL,slot INTEGER NOT NULL,PRIMARY KEY(booking,generation,lane));
+                CREATE TABLE IF NOT EXISTS receipt_usage(id TEXT PRIMARY KEY REFERENCES receipts(id),booking TEXT NOT NULL,generation TEXT NOT NULL,lane TEXT NOT NULL,owner TEXT NOT NULL,model TEXT NOT NULL,list TEXT);
+                CREATE INDEX IF NOT EXISTS receipt_usage_booking ON receipt_usage(booking,generation,lane) WHERE list IS NULL;
+                CREATE TABLE IF NOT EXISTS usage_stats(scope TEXT PRIMARY KEY,requests INTEGER NOT NULL,tokens TEXT NOT NULL,spent TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS usage_groups(scope TEXT NOT NULL,kind TEXT NOT NULL,key TEXT NOT NULL,requests INTEGER NOT NULL,PRIMARY KEY(scope,kind,key));
+                CREATE INDEX IF NOT EXISTS usage_groups_top ON usage_groups(scope,kind,requests DESC,key);
+                CREATE TABLE IF NOT EXISTS one_shot_bookings(id TEXT PRIMARY KEY,booking TEXT NOT NULL,lane TEXT NOT NULL,slot INTEGER NOT NULL,tx_order INTEGER NOT NULL,ix INTEGER NOT NULL,owner TEXT NOT NULL,model TEXT NOT NULL,list TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS one_shot_booking_order ON one_shot_bookings(booking,lane,slot DESC,tx_order DESC,ix DESC);
+                CREATE TABLE IF NOT EXISTS one_shot_claims(id TEXT PRIMARY KEY,booking TEXT NOT NULL,lane TEXT NOT NULL,model TEXT NOT NULL,provider TEXT NOT NULL,slot INTEGER NOT NULL,tx_order INTEGER NOT NULL,ix INTEGER NOT NULL,time INTEGER NOT NULL,tokens TEXT NOT NULL,charge TEXT NOT NULL,assigned INTEGER NOT NULL DEFAULT 0,owner TEXT,list TEXT);
+                CREATE INDEX IF NOT EXISTS one_shot_pending ON one_shot_claims(slot,tx_order,ix) WHERE assigned=0;
+                CREATE INDEX IF NOT EXISTS one_shot_provider ON one_shot_claims(provider,slot) WHERE assigned=1;
+                CREATE INDEX IF NOT EXISTS one_shot_unknown ON one_shot_claims(booking,lane) WHERE assigned=-1;")?;
             let previous: Option<String> = conn.query_row("SELECT value FROM settings WHERE key='identity'", [], |r| r.get(0)).optional()?;
             if previous.is_some_and(|v| v != identity) { return Err(Error::bad("Database belongs to different protocol, network or commitment; use a separate database")); }
             conn.execute("INSERT OR IGNORE INTO settings VALUES('identity',?1)", [&identity])?;
@@ -49,6 +61,9 @@ impl Db {
             conn.execute_batch("CREATE INDEX IF NOT EXISTS signatures_retry ON signatures(done,next_attempt,slot)")?;
             conn.execute_batch("CREATE INDEX IF NOT EXISTS signatures_fresh_queue ON signatures(slot) WHERE done=0 AND attempts=0;
                 CREATE INDEX IF NOT EXISTS signatures_due_queue ON signatures(next_attempt,slot) WHERE done=0 AND attempts>0;")?;
+            if conn.query_row("SELECT value FROM settings WHERE key='list_usage_version'",[],|r|r.get::<_,String>(0)).optional()?.as_deref()!=Some("1") {
+                conn.execute_batch("BEGIN IMMEDIATE; UPDATE signatures SET done=0,attempts=0,next_attempt=0; INSERT OR REPLACE INTO settings VALUES('list_usage_version','1'); COMMIT;")?;
+            }
             Ok(conn)
         }).await.map_err(|_| Error::internal())??;
         Ok(Self {

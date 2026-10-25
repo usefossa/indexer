@@ -11,12 +11,17 @@ use std::collections::BTreeMap;
 
 pub struct Catalog {
     pub ready: bool,
+    pub directory: std::sync::Arc<crate::profiles::Directory>,
     pub value: Value,
     pub body: Bytes,
     pub message: Utf8Bytes,
 }
 pub fn build(index: &State, config: &Config) -> Catalog {
     let ready = index.catalog_ready(config);
+    let directory = index
+        .directory
+        .get_or_init(|| std::sync::Arc::new(crate::profiles::Directory::build(index)))
+        .clone();
     let list = index
         .accounts
         .get(&config.provider_list.to_string())
@@ -120,6 +125,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
     let message = format!("{{\"type\":\"catalog\",\"data\":{}}}", value).into();
     Catalog {
         ready,
+        directory,
         value,
         body,
         message,

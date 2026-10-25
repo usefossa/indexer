@@ -30,17 +30,25 @@ pub struct Receipt {
     pub signature: String,
     pub slot: u64,
 }
+impl Receipt {
+    pub fn lane(&self) -> Option<String> {
+        let raw = STANDARD.decode(&self.receipt).ok()?;
+        (raw.len() == 120).then(|| address(&raw, 32))
+    }
+    pub fn storage_id(&self) -> Option<String> {
+        let id = format!("{}:{}:{}", self.bucket, self.epoch, self.index);
+        Some(if self.version == 2 {
+            format!("{id}:{}", self.lane()?)
+        } else {
+            id
+        })
+    }
+}
 fn legacy_version() -> u8 {
     1
 }
-pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<Receipt> {
-    if tx.get("meta").and_then(|v| v.get("err")) != Some(&Value::Null) {
-        return Vec::new();
-    }
-    let Some(slot) = tx["slot"].as_u64() else {
-        return Vec::new();
-    };
-    let keys: Vec<_> = tx["transaction"]["message"]["accountKeys"]
+pub(crate) fn transaction_keys(tx: &Value) -> Vec<Vec<u8>> {
+    tx["transaction"]["message"]["accountKeys"]
         .as_array()
         .into_iter()
         .flatten()
@@ -62,7 +70,80 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 .filter(|k| k.len() == 32)
                 .unwrap_or_default()
         })
-        .collect();
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BookingList {
+    pub booking: String,
+    pub generation: String,
+    pub list: String,
+    pub lane: String,
+    pub owner: String,
+    pub model: String,
+    pub slot: u64,
+}
+pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingList> {
+    if tx.get("meta").and_then(|m| m.get("err")) != Some(&Value::Null) {
+        return Vec::new();
+    }
+    let Some(slot) = tx["slot"].as_u64().filter(|s| *s <= i64::MAX as u64) else {
+        return Vec::new();
+    };
+    let keys = transaction_keys(tx);
+    tx["transaction"]["message"]["instructions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|ix| {
+            if bs58::encode(keys.get(usize::try_from(ix["programIdIndex"].as_u64()?).ok()?)?)
+                .into_string()
+                != program
+            {
+                return None;
+            }
+            let accounts = ix["accounts"].as_array().filter(|a| a.len() == 9)?;
+            let key = |i: usize| {
+                keys.get(usize::try_from(accounts.get(i)?.as_u64()?).ok()?)
+                    .filter(|k| k.len() == 32)
+                    .map(|k| bs58::encode(k).into_string())
+            };
+            if key(0)? != market {
+                return None;
+            }
+            let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
+            if data.first() != Some(&6) || ![108, 116].contains(&data.len()) {
+                return None;
+            }
+            let generation = if data.len() == 116 {
+                u64_at(&data, 108)
+            } else {
+                0
+            };
+            if generation >= 1 << 56 {
+                return None;
+            }
+            Some(BookingList {
+                booking: key(6)?,
+                generation: generation.to_string(),
+                list: key(8)?,
+                lane: key(4)?,
+                owner: key(5)?,
+                model: key(1)?,
+                slot,
+            })
+        })
+        .collect()
+}
+
+pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<Receipt> {
+    if tx.get("meta").and_then(|v| v.get("err")) != Some(&Value::Null) {
+        return Vec::new();
+    }
+    let Some(slot) = tx["slot"].as_u64() else {
+        return Vec::new();
+    };
+    let keys = transaction_keys(tx);
     tx["transaction"]["message"]["instructions"]
         .as_array()
         .into_iter()
@@ -207,7 +288,7 @@ async fn discover(app: &App, historical: bool) -> Result<()> {
         tx.commit()?;Ok(())
     }).await
 }
-async fn process(app: &App, turn: u8) -> Result<usize> {
+async fn process(app: &App, turn: u8, blocks: &mut crate::one_shot::Blocks) -> Result<usize> {
     let pending = app
         .db
         .call(move |conn| {
@@ -236,28 +317,50 @@ async fn process(app: &App, turn: u8) -> Result<usize> {
             retry(app, signature).await?;
             continue;
         }
+        let events = match crate::one_shot::decode(
+            &tx,
+            &app.config.program.to_string(),
+            &app.config.market.to_string(),
+            &app.config.mint.to_string(),
+        ) {
+            Ok(events) => events,
+            Err(_) => {
+                retry(app, signature).await?;
+                continue;
+            }
+        };
+        let slot = tx["slot"]
+            .as_u64()
+            .filter(|s| *s <= i64::MAX as u64)
+            .ok_or(Error::unavailable("Invalid transaction slot"))?;
+        let order = if events.is_empty() {
+            0
+        } else {
+            match crate::one_shot::order(app, slot, &signature, blocks).await {
+                Ok(order) => order,
+                Err(_) => {
+                    retry(app, signature).await?;
+                    continue;
+                }
+            }
+        };
+        let time = tx["blockTime"].as_i64().unwrap_or(0);
         let receipts = decode(
             &tx,
             &app.config.program.to_string(),
             &app.config.market.to_string(),
             &signature,
         );
+        let bookings = decode_bookings(
+            &tx,
+            &app.config.program.to_string(),
+            &app.config.market.to_string(),
+        );
         app.db
             .call(move |conn| {
                 let transaction = conn.transaction()?;
-                for receipt in receipts {
-                    let id = format!("{}:{}:{}", receipt.bucket, receipt.epoch, receipt.index);
-                    transaction.execute(
-                        "INSERT OR IGNORE INTO receipts VALUES(?1,?2,?3,?4,?5)",
-                        params![
-                            id,
-                            receipt.owner,
-                            receipt.provider,
-                            receipt.slot,
-                            serde_json::to_string(&receipt)?
-                        ],
-                    )?;
-                }
+                crate::usage::store(&transaction, &bookings, &receipts)?;
+                crate::one_shot::store(&transaction, &signature, slot, order, time, &events)?;
                 transaction.execute(
                     "UPDATE signatures SET done=1 WHERE signature=?1",
                     [signature],
@@ -292,12 +395,16 @@ async fn discovery(app: &App) {
 }
 async fn drain(app: &App) {
     let mut turn = 0;
+    let mut blocks = crate::one_shot::Blocks::new();
     loop {
         let delay = if !app.index.ready(&app.config).await {
             Duration::from_secs(1)
         } else {
-            match process(app, turn).await {
+            match process(app, turn, &mut blocks).await {
                 Ok(count) => {
+                    if let Err(error) = crate::one_shot::resolve(app).await {
+                        tracing::warn!(%error,"one-shot usage attribution unavailable");
+                    }
                     turn = (turn + 1) % 3;
                     if count == 32 {
                         Duration::from_millis(10)

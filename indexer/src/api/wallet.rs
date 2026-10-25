@@ -258,7 +258,7 @@ pub async fn provider(State(app): State<App>, Path(wallet): Path<String>) -> Res
         )
     };
     Ok(Json(
-        json!({"ready":ready,"provider":provider,"receipts":receipts::history(&app,&wallet,true).await?}),
+        json!({"ready":ready,"provider":provider,"lists":crate::profiles::memberships(&app,&wallet).await?,"receipts":receipts::history(&app,&wallet,true).await?}),
     ))
 }
 

@@ -26,6 +26,7 @@ pub fn reference(data: &[u8]) -> Option<(schema::Kind, &[u8], &str)> {
     let (kind, hash, len, uri) = match protocol::kind(data)? {
         Kind::Provider => (schema::Kind::Provider, 72, 104, 108),
         Kind::Metadata => (schema::Kind::Model, 104, 136, 140),
+        Kind::ListMetadata => (schema::Kind::List, 104, 136, 140),
         _ => return None,
     };
     let (hash, uri) = protocol::metadata_uri(data, hash, len, uri)?;
@@ -66,6 +67,7 @@ pub async fn restore(db: &Db, max: usize, max_bytes: usize) -> Result<HashMap<St
             let kind = match kind.as_str() {
                 "provider" => schema::Kind::Provider,
                 "model" => schema::Kind::Model,
+                "list" => schema::Kind::List,
                 _ => continue,
             };
             if let Ok(hash) = hex::decode(&hash)
@@ -102,45 +104,48 @@ pub fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+async fn fetch_url(uri: &str, max: usize) -> Option<Vec<u8>> {
+    let url = reqwest::Url::parse(uri).ok()?;
+    let host = url.host_str()?.to_owned();
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || host.parse::<IpAddr>().is_ok()
+        || host.ends_with(".local")
+        || host == "localhost"
+    {
+        return None;
+    }
+    let addresses: Vec<SocketAddr> = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((host.as_str(), 443)),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .collect();
+    if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
+        return None;
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(8))
+        .resolve_to_addrs(&host, &addresses)
+        .build()
+        .ok()?;
+    let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    rpc::limited(response, max).await.ok()
+}
 async fn fetch(data: Arc<[u8]>) -> Option<Document> {
     let (kind, hash, uri) = reference(&data)?;
     let body = if let Some(encoded) = uri.strip_prefix("data:application/json;base64,") {
         STANDARD.decode(encoded).ok()?
     } else {
-        let url = reqwest::Url::parse(uri).ok()?;
-        let host = url.host_str()?.to_owned();
-        if url.scheme() != "https"
-            || url.port_or_known_default() != Some(443)
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-            || host.parse::<IpAddr>().is_ok()
-            || host.ends_with(".local")
-            || host == "localhost"
-        {
-            return None;
-        }
-        let addresses: Vec<SocketAddr> = tokio::time::timeout(
-            Duration::from_secs(3),
-            tokio::net::lookup_host((host.as_str(), 443)),
-        )
-        .await
-        .ok()?
-        .ok()?
-        .collect();
-        if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
-            return None;
-        }
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(8))
-            .resolve_to_addrs(&host, &addresses)
-            .build()
-            .ok()?;
-        let response = client.get(url).send().await.ok()?.error_for_status().ok()?;
-        rpc::limited(response, schema::MAX_BYTES).await.ok()?
+        fetch_url(uri, schema::MAX_BYTES).await?
     };
     verified(kind, hash, body)
 }
@@ -166,6 +171,7 @@ pub async fn run(app: App) {
             state.documents.retain(|key, _| referenced.contains(key));
             if !obsolete.is_empty() {
                 state.cached = None;
+                state.directory.take();
             }
             obsolete
         };
@@ -255,6 +261,7 @@ pub async fn run(app: App) {
             if s.documents.len() < app.config.max_accounts {
                 s.documents.insert(key.clone(), doc);
                 s.cached = None;
+                s.directory.take();
             }
             drop(s);
             failures.remove(&key);
@@ -268,7 +275,7 @@ pub async fn document(app: &App, hash: &str) -> Result<Arc<[u8]>> {
         return Err(Error::bad("Invalid metadata hash"));
     }
     let s = app.index.state.read().await;
-    for kind in ["provider", "model"] {
+    for kind in ["provider", "model", "list"] {
         if let Some(doc) = s.documents.get(&format!("{kind}:{hash}")) {
             return Ok(doc.raw.clone());
         }
@@ -278,6 +285,51 @@ pub async fn document(app: &App, hash: &str) -> Result<Arc<[u8]>> {
         "Metadata unavailable",
     ))
 }
+
+type IconEntry = Arc<tokio::sync::Mutex<Option<(Instant, Arc<[u8]>)>>>;
+pub struct Icons {
+    entries: tokio::sync::Mutex<HashMap<String, IconEntry>>,
+    permits: tokio::sync::Semaphore,
+}
+impl Default for Icons {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+            permits: tokio::sync::Semaphore::new(4),
+        }
+    }
+}
+pub async fn icon(app: &App, uri: &str) -> Result<Arc<[u8]>> {
+    let entry = {
+        let mut entries = app.icons.entries.lock().await;
+        if entries.len() >= 256 {
+            entries.retain(|_, v| Arc::strong_count(v) > 1);
+        }
+        if entries.len() >= 256 && !entries.contains_key(uri) {
+            return Err(Error::unavailable("Icon cache busy"));
+        }
+        entries.entry(uri.to_owned()).or_default().clone()
+    };
+    let mut cached = entry.lock().await;
+    if let Some((at, raw)) = cached.as_ref()
+        && at.elapsed() < Duration::from_secs(300)
+    {
+        return Ok(raw.clone());
+    }
+    let _permit = app
+        .icons
+        .permits
+        .try_acquire()
+        .map_err(|_| Error::unavailable("Icon fetch busy"))?;
+    let raw = fetch_url(uri, schema::MAX_ICON_BYTES)
+        .await
+        .ok_or(Error::unavailable("Icon unavailable"))?;
+    schema::validate_icon(&raw).map_err(|_| Error::unavailable("Invalid list icon"))?;
+    let raw: Arc<[u8]> = raw.into();
+    *cached = Some((Instant::now(), raw.clone()));
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
