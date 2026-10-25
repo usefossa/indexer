@@ -235,7 +235,7 @@ impl Fixture {
             &config.program.to_string(),
             &market_data,
         );
-        let mut list = vec![0; 120];
+        let mut list = vec![0; 144];
         list[..8].copy_from_slice(b"LIST0V30");
         list[8..40].copy_from_slice(config.market.as_ref());
         list[72..76].copy_from_slice(&1u32.to_le_bytes());

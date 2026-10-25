@@ -297,14 +297,14 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
         Pubkey::find_program_address(&[b"model_metadata", model.as_ref()], &config.program);
     let terms = Pubkey::new_from_array([10; 32]);
     let capacity = Pubkey::new_from_array([11; 32]);
-    let mut list = vec![0; 160];
+    let mut list = vec![0; 208];
     list[..8].copy_from_slice(b"LIST0V30");
     list[8..40].copy_from_slice(config.market.as_ref());
     list[40..72].copy_from_slice(wallet.as_ref());
     list[72..76].copy_from_slice(&2u32.to_le_bytes());
     list[76..80].copy_from_slice(&1u32.to_le_bytes());
     list[80..112].copy_from_slice(wallet.as_ref());
-    list[144..152].copy_from_slice(&((0x08080808u64 << 32) | 28).to_le_bytes());
+    list[144..176].fill(8);
     let mut rows = vec![
         (config.market.to_string(), market(&config)),
         (config.provider_list.to_string(), list.clone()),
@@ -524,15 +524,15 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
 fn provider_lists_reject_malformed_foreign_unsorted_duplicate_and_zero_members() {
     let dir = tempfile::tempdir().unwrap();
     let config = common::config(dir.path());
-    let mut list = vec![0; 200];
+    let mut list = vec![0; 272];
     list[..8].copy_from_slice(b"LIST0V30");
     list[8..40].copy_from_slice(config.market.as_ref());
     list[72..76].copy_from_slice(&3u32.to_le_bytes());
     list[76..80].copy_from_slice(&2u32.to_le_bytes());
     list[80..112].fill(5);
     list[112..144].fill(6);
-    list[176..184].copy_from_slice(&((0x06060606u64 << 32) | 32).to_le_bytes());
-    list[184..192].copy_from_slice(&((0x05050505u64 << 32) | 28).to_le_bytes());
+    list[176..208].fill(6);
+    list[208..240].fill(5);
     assert_eq!(
         protocol::validate(&config.provider_list.to_string(), &list, &config),
         Some(Kind::ProviderList)
@@ -549,10 +549,9 @@ fn provider_lists_reject_malformed_foreign_unsorted_duplicate_and_zero_members()
         (80, 112, 0),
         (144, 145, 1),
         (176, 177, 1),
-        (178, 179, 255),
-        (180, 184, 7),
-        (184, 185, 0),
-        (192, 193, 1),
+        (207, 208, 5),
+        (208, 209, 6),
+        (240, 241, 1),
     ] {
         let mut bad = list.clone();
         bad[start..end].fill(value);
@@ -563,11 +562,15 @@ fn provider_lists_reject_malformed_foreign_unsorted_duplicate_and_zero_members()
         list[80 + index * 32..108 + index * 32].fill(1);
         list[108 + index * 32..112 + index * 32].copy_from_slice(&value.to_be_bytes());
     }
-    for (node, index, value) in [(0, 1, 256u64), (1, 0, 255), (2, 2, 0x80000000)] {
-        list[176 + node * 8..184 + node * 8]
-            .copy_from_slice(&((value << 32) | (index << 5) | 28).to_le_bytes());
+    for (node, index) in [(0, 1), (1, 0), (2, 2)] {
+        for word in 0..4 {
+            let key = 80 + index * 32 + word * 8;
+            let target = 176 + node * 32 + word * 8;
+            let value = u64::from_be_bytes(list[key..key + 8].try_into().unwrap());
+            list[target..target + 8].copy_from_slice(&value.to_le_bytes());
+        }
     }
     assert_eq!(protocol::kind(&list), Some(Kind::ProviderList));
-    list[176..184].copy_from_slice(&((0x01010101u64 << 32) | 32 | 24).to_le_bytes());
+    list[200..208].reverse();
     assert!(protocol::kind(&list).is_none());
 }

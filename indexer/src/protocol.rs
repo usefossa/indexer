@@ -75,30 +75,22 @@ fn pda(address: &Pubkey, seeds: &[&[u8]], bump: u8, program: &Pubkey) -> bool {
     let (expected, canonical) = Pubkey::find_program_address(seeds, program);
     *address == expected && bump == canonical
 }
-fn list_tree(keys: &[u8], tree: &[u8], node: usize, low: usize, high: usize) -> bool {
-    if node >= tree.len() / 8 {
-        return low == high;
+fn list_tree(keys: &[u8], tree: &[u8], node: usize, at: &mut usize) -> bool {
+    if node >= tree.len() / 32 {
+        return true;
     }
-    let entry = u64_at(tree, node * 8);
-    let mid = (entry as usize & 0x1ffe0) >> 5;
-    if mid < low || mid >= high {
+    if !list_tree(keys, tree, node * 2 + 1, at) {
         return false;
     }
-    let offset = (0..28)
-        .step_by(4)
-        .find(|&at| {
-            keys[low * 32 + at..low * 32 + at + 4]
-                != keys[(high - 1) * 32 + at..(high - 1) * 32 + at + 4]
-        })
-        .unwrap_or(28);
-    let value = u32::from_be_bytes(
-        keys[mid * 32 + offset..mid * 32 + offset + 4]
-            .try_into()
-            .unwrap(),
-    );
-    entry == (u64::from(value) << 32) | ((mid as u64) << 5) | offset as u64
-        && list_tree(keys, tree, node * 2 + 1, low, mid)
-        && list_tree(keys, tree, node * 2 + 2, mid + 1, high)
+    let key = &keys[*at * 32..(*at + 1) * 32];
+    if !(0..32).step_by(8).all(|offset| {
+        u64_at(tree, node * 32 + offset)
+            == u64::from_be_bytes(key[offset..offset + 8].try_into().unwrap())
+    }) {
+        return false;
+    }
+    *at += 1;
+    list_tree(keys, tree, node * 2 + 2, at)
 }
 pub fn kind(data: &[u8]) -> Option<Kind> {
     Some(match data.get(..8)? {
@@ -122,7 +114,7 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
         b"LIST0V30" if data.len() >= 80 => {
             let limit = u32_at(data, 72) as usize;
             let count = u32_at(data, 76) as usize;
-            if !(1..=4096).contains(&limit) || count > limit || data.len() != 80 + limit * 40 {
+            if !(1..=4096).contains(&limit) || count > limit || data.len() != 80 + limit * 64 {
                 return None;
             }
             let members = &data[80..80 + count * 32];
@@ -133,8 +125,8 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
                 || data[80 + count * 32..80 + limit * 32]
                     .iter()
                     .any(|v| *v != 0)
-                || tree[count * 8..].iter().any(|v| *v != 0)
-                || !list_tree(members, &tree[..count * 8], 0, 0, count)
+                || tree[count * 32..].iter().any(|v| *v != 0)
+                || !list_tree(members, &tree[..count * 32], 0, &mut 0)
             {
                 return None;
             }
