@@ -38,6 +38,11 @@ pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
             json!([config.program.to_string(),{"encoding":"base64","commitment":config.commitment}]),
         ),
         (2, "slotSubscribe", json!([])),
+        (
+            3,
+            "accountSubscribe",
+            json!([config.provider_list.to_string(), {"encoding":"base64","commitment":config.commitment}]),
+        ),
     ] {
         socket
             .send(Message::Text(
@@ -61,16 +66,17 @@ pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
                 Some(Ok(Message::Text(text)))=>{
                     let value:Value=serde_json::from_str(&text).map_err(|_|Error::unavailable("Invalid websocket JSON"))?;
                     if value.get("error").is_some() {return Err(Error::unavailable("Websocket subscription rejected"));}
-                    if let Some(id)=value["id"].as_u64() {if (1..=2).contains(&id)&&value["result"].as_u64().is_some(){acknowledgements|=1<<(id-1);if acknowledgements==3 {tx.send(Event::Connected).await.map_err(|_|Error::unavailable("Indexer stopped"))?;acknowledgements=7;}}continue;}
+                    if let Some(id)=value["id"].as_u64() {if (1..=3).contains(&id)&&value["result"].as_u64().is_some(){acknowledgements|=1<<(id-1);if acknowledgements==7 {tx.send(Event::Connected).await.map_err(|_|Error::unavailable("Indexer stopped"))?;acknowledgements=15;}}continue;}
                     match value["method"].as_str() {
                         Some("programNotification")=>{let result=&value["params"]["result"];let slot=result["context"]["slot"].as_u64().ok_or(Error::unavailable("Missing stream context"))?;let account=&result["value"];let address=account["pubkey"].as_str().ok_or(Error::unavailable("Missing stream address"))?;crate::protocol::pubkey(address)?;version=version.checked_add(1).ok_or(Error::unavailable("Stream sequence exhausted"))?;let record=Record::from_rpc(&account["account"],slot,version)?;tx.send(Event::Accounts(vec![(address.into(),record)])).await.map_err(|_|Error::unavailable("Indexer stopped"))?;},
+                        Some("accountNotification")=>{let result=&value["params"]["result"];let slot=result["context"]["slot"].as_u64().ok_or(Error::unavailable("Missing list context"))?;version=version.checked_add(1).ok_or(Error::unavailable("Stream sequence exhausted"))?;let record=Record::from_rpc(&result["value"],slot,version)?;tx.send(Event::Accounts(vec![(config.provider_list.to_string(),record)])).await.map_err(|_|Error::unavailable("Indexer stopped"))?;},
                         Some("slotNotification")=>{let slot=value["params"]["result"]["slot"].as_u64().ok_or(Error::unavailable("Missing slot notification"))?;if slot>last_slot {last_slot=slot;last=Instant::now();tx.send(Event::Activity(slot)).await.map_err(|_|Error::unavailable("Indexer stopped"))?;}},_=>{}
                     }
                 },
                 Some(Ok(Message::Ping(bytes)))=>socket.send(Message::Pong(bytes)).await.map_err(|_|Error::unavailable("Websocket heartbeat failed"))?,
                 Some(Ok(Message::Close(_)))|Some(Err(_))|None=>return Err(Error::unavailable("Websocket closed")),_=>{}
             },
-            _=ping.tick()=>{if acknowledgements!=7&&opened.elapsed()>Duration::from_secs(10)||last.elapsed()>config.stale {return Err(Error::unavailable("Websocket stream stalled"));}tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Ping(Vec::new().into()))).await.map_err(|_|Error::unavailable("Websocket heartbeat timed out"))?.map_err(|_|Error::unavailable("Websocket heartbeat failed"))?;}
+            _=ping.tick()=>{if acknowledgements!=15&&opened.elapsed()>Duration::from_secs(10)||last.elapsed()>config.stale {return Err(Error::unavailable("Websocket stream stalled"));}tokio::time::timeout(Duration::from_secs(5),socket.send(Message::Ping(Vec::new().into()))).await.map_err(|_|Error::unavailable("Websocket heartbeat timed out"))?.map_err(|_|Error::unavailable("Websocket heartbeat failed"))?;}
         }
     }
 }

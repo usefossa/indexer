@@ -12,6 +12,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
+use solana_pubkey::Pubkey;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -146,7 +147,6 @@ pub async fn booking_pool(app: &App, session: &Session) -> Vec<Value> {
         if protocol::kind(d) != Some(Kind::Booking)
             || address(d, 8) != session.wallet
             || address(d, 192) != session.lane
-            || d[359] == 0xa5
             || (d[148] != 5 && u64_at(d, 152) == 0)
         {
             continue;
@@ -180,11 +180,10 @@ pub async fn user_orders(app: &App, wallet: &str, lane: Option<&str>) -> Vec<Val
         if protocol::kind(d) != Some(Kind::Booking)
             || address(d, 8) != wallet
             || lane.is_some_and(|l| l != address(d, 192))
-            || d[359] == 0xa5
         {
             continue;
         }
-        orders.push(json!({"address":id,"slot":r.slot,"provider":address(d,40),"model":address(d,224),"lane":address(d,192),"generation":u64_at(d,152).to_string(),"offerSlot":u32_at(d,352),"status":d[148],"reserve":u64_at(d,104).to_string(),"charge":u64_at(d,160).to_string(),"uncachedTokens":u32_at(d,168),"cachedTokens":u32_at(d,172),"outputTokens":u32_at(d,176),"claimEnd":i64_at(d,132),"disputeEnd":i64_at(d,140)}));
+        orders.push(json!({"address":id,"slot":r.slot,"provider":address(d,40),"model":address(d,224),"lane":address(d,192),"generation":u64_at(d,152).to_string(),"offerSlot":u32_at(d,352),"status":d[148],"reserve":u64_at(d,104).to_string(),"charge":u64_at(d,160).to_string(),"uncachedTokens":u32_at(d,168),"cachedTokens":u32_at(d,172),"outputTokens":u32_at(d,176),"claimEnd":i64_at(d,132),"providerList":address(d,320)}));
     }
     orders.sort_by_key(|v| std::cmp::Reverse(v["slot"].as_u64().unwrap_or(0)));
     orders
@@ -233,17 +232,36 @@ pub async fn profile(State(app): State<App>, headers: HeaderMap) -> Result<Json<
     ))
 }
 pub async fn provider(State(app): State<App>, Path(wallet): Path<String>) -> Result<Json<Value>> {
-    protocol::pubkey(&wallet)?;
-    let catalog = app.index.catalog(&app.config).await;
-    let provider = catalog.value["providers"]
-        .as_array()
-        .and_then(|p| p.iter().find(|v| v["wallet"] == wallet))
-        .cloned()
-        .ok_or(Error(StatusCode::NOT_FOUND, "Provider unavailable"))?;
+    let key = protocol::pubkey(&wallet)?;
+    let address = Pubkey::find_program_address(
+        &[b"provider", app.config.market.as_ref(), key.as_ref()],
+        &app.config.program,
+    )
+    .0
+    .to_string();
+    let (provider, ready) = {
+        let state = app.index.state.read().await;
+        let record = state
+            .accounts
+            .get(&address)
+            .filter(|r| protocol::kind(&r.data) == Some(Kind::Provider))
+            .ok_or(Error(StatusCode::NOT_FOUND, "Provider unavailable"))?;
+        let doc = crate::metadata::key(&record.data)
+            .and_then(|key| state.documents.get(&key))
+            .ok_or(Error(
+                StatusCode::NOT_FOUND,
+                "Provider metadata unavailable",
+            ))?;
+        (
+            json!({"wallet":wallet,"address":address,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image")}),
+            state.ready(&app.config),
+        )
+    };
     Ok(Json(
-        json!({"ready":catalog.ready,"provider":provider,"receipts":receipts::history(&app,&wallet,true).await?}),
+        json!({"ready":ready,"provider":provider,"receipts":receipts::history(&app,&wallet,true).await?}),
     ))
 }
+
 pub async fn quotes(app: App) {
     let mut timer = tokio::time::interval(Duration::from_secs(5));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

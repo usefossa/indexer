@@ -12,6 +12,8 @@ use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Receipt {
+    #[serde(default = "legacy_version")]
+    pub version: u8,
     pub bucket: String,
     pub epoch: i64,
     pub index: u64,
@@ -27,6 +29,9 @@ pub struct Receipt {
     pub tokens: u64,
     pub signature: String,
     pub slot: u64,
+}
+fn legacy_version() -> u8 {
+    1
 }
 pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<Receipt> {
     if tx.get("meta").and_then(|v| v.get("err")) != Some(&Value::Null) {
@@ -68,7 +73,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let accounts = ix["accounts"].as_array()?;
-            if accounts.len() != 12 {
+            if ![11, 12].contains(&accounts.len()) {
                 return None;
             }
             let key = |i: usize| {
@@ -79,26 +84,37 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
-            if data.len() != 157 || data[0] != 7 {
-                return None;
-            }
-            let r = &data[37..];
-            let index = u64_at(&data, 29);
+            let version = match (data.len(), accounts.len(), data.first()) {
+                (141, 11, Some(7)) => 2,
+                (157, 12, Some(7)) => 1,
+                _ => return None,
+            };
+            let r = &data[if version == 2 { 21 } else { 37 }..];
+            let index = if version == 2 {
+                u64_at(r, 96)
+            } else {
+                u64_at(&data, 29)
+            };
             let generation = u64_at(r, 96);
             let charge = u64_at(r, 104);
             if r[32..64] != *key(3)?
                 || r[64..96] != *key(4)?
                 || generation == 0
                 || generation != u64_at(&data, 13)
-                || charge == 0
-                || index >= 65535
+                || generation >= 1 << 56
+                || version == 1 && (charge == 0 || index >= 65535)
             {
                 return None;
             }
             let deadline = u64_at(r, 112) as i64;
             Some(Receipt {
-                bucket: bs58::encode(key(11)?).into_string(),
-                epoch: u64_at(&data, 21) as i64,
+                version,
+                bucket: bs58::encode(key(if version == 2 { 4 } else { 11 })?).into_string(),
+                epoch: if version == 2 {
+                    0
+                } else {
+                    u64_at(&data, 21) as i64
+                },
                 index,
                 receipt: STANDARD.encode(r),
                 model: bs58::encode(key(1)?).into_string(),
@@ -108,9 +124,9 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 generation: generation.to_string(),
                 charge: charge.to_string(),
                 deadline,
-                time: tx["blockTime"]
-                    .as_i64()
-                    .unwrap_or_else(|| deadline.saturating_sub(3900)),
+                time: tx["blockTime"].as_i64().unwrap_or_else(|| {
+                    deadline.saturating_sub(if version == 2 { 300 } else { 3900 })
+                }),
                 tokens: [1, 5, 9]
                     .into_iter()
                     .map(|at| u32_at(&data, at) as u64)
@@ -302,7 +318,7 @@ pub async fn history(app: &App, wallet: &str, provider: bool) -> Result<Value> {
     let wallet = wallet.to_owned();
     app.db.call(move|conn|{
         let sql=if provider{"SELECT body FROM receipts WHERE provider=?1 ORDER BY slot DESC LIMIT 1000"}else{"SELECT body FROM receipts WHERE owner=?1 ORDER BY slot DESC LIMIT 1000"};
-        let mut statement=conn.prepare(sql)?;let rows=statement.query_map([wallet],|r|r.get::<_,String>(0))?;let mut receipts=Vec::new();for row in rows{receipts.push(serde_json::from_str::<Value>(&row?)?);}
+        let mut statement=conn.prepare(sql)?;let rows=statement.query_map([wallet],|r|r.get::<_,String>(0))?;let mut receipts=Vec::new();for row in rows{receipts.push(serde_json::to_value(serde_json::from_str::<Receipt>(&row?)?)?);}
         let pending:u64=conn.query_row("SELECT count(*) FROM signatures WHERE done=0",[],|r|r.get(0))?;
         let exhausted:Option<String>=conn.query_row("SELECT value FROM settings WHERE key='history_exhausted'",[],|r|r.get(0)).optional()?;
         let checked:Option<String>=conn.query_row("SELECT value FROM settings WHERE key='receipts_checked_at'",[],|r|r.get(0)).optional()?;

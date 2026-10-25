@@ -115,7 +115,7 @@ async fn mock_socket(State(mock): State<Mock>, ws: WebSocketUpgrade) -> Response
 }
 async fn upstream_stream(mock: Mock, mut socket: WebSocket) {
     let mut events = mock.0.events.subscribe();
-    let mut subscriptions = HashMap::<u64, String>::new();
+    let mut subscriptions = HashMap::<u64, (String, Option<String>)>::new();
     let mut timer = tokio::time::interval(Duration::from_millis(100));
     loop {
         tokio::select! {
@@ -124,7 +124,7 @@ async fn upstream_stream(mock: Mock, mut socket: WebSocket) {
                     let Ok(body)=serde_json::from_str::<Value>(&raw) else {return};
                     let method=body["method"].as_str().unwrap_or_default();
                     let id=subscriptions.len() as u64+1;
-                    subscriptions.insert(id,method.into());
+                    subscriptions.insert(id,(method.into(),body["params"][0].as_str().map(str::to_owned)));
                     if socket.send(Message::Text(json!({"jsonrpc":"2.0","id":body["id"],"result":id}).to_string().into())).await.is_err(){return;}
                 },
                 Some(Ok(Message::Ping(raw)))=>{if socket.send(Message::Pong(raw)).await.is_err(){return;}},
@@ -133,14 +133,16 @@ async fn upstream_stream(mock: Mock, mut socket: WebSocket) {
             },
             Ok(address)=events.recv()=>{
                 let slot=mock.0.slot.load(Ordering::Relaxed);
-                for (id,method) in &subscriptions {
-                    if method=="programSubscribe" && socket.send(Message::Text(json!({"jsonrpc":"2.0","method":"programNotification","params":{"subscription":id,"result":{"context":{"slot":slot},"value":{"pubkey":address,"account":mock.account(&address)}}}}).to_string().into())).await.is_err(){return;}
+                let explicit = subscriptions.values().any(|(method, target)| method == "accountSubscribe" && target.as_deref() == Some(address.as_str()));
+                for (id,(method,target)) in &subscriptions {
+                    if method=="accountSubscribe" && target.as_deref()==Some(address.as_str()) && socket.send(Message::Text(json!({"jsonrpc":"2.0","method":"accountNotification","params":{"subscription":id,"result":{"context":{"slot":slot},"value":mock.account(&address)}}}).to_string().into())).await.is_err(){return;}
+                    if method=="programSubscribe" && (!explicit || !mock.account(&address).is_null()) && socket.send(Message::Text(json!({"jsonrpc":"2.0","method":"programNotification","params":{"subscription":id,"result":{"context":{"slot":slot},"value":{"pubkey":address,"account":mock.account(&address)}}}}).to_string().into())).await.is_err(){return;}
                 }
             },
             _=timer.tick()=>{
                 if !mock.0.online.load(Ordering::Relaxed){let _=socket.close().await;return;}
                 let slot=mock.0.slot.fetch_add(1,Ordering::Relaxed)+1;
-                for (id,method) in &subscriptions {
+                for (id,(method,_)) in &subscriptions {
                     if method=="slotSubscribe" && socket.send(Message::Text(json!({"jsonrpc":"2.0","method":"slotNotification","params":{"subscription":id,"result":{"slot":slot,"parent":slot-1,"root":slot-2}}}).to_string().into())).await.is_err(){return;}
                 }
             },
@@ -204,6 +206,7 @@ impl Fixture {
             database: directory.path().join("state/indexer.sqlite"),
             program: Pubkey::from_str("F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT").unwrap(),
             market: Pubkey::from_str("8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som").unwrap(),
+            provider_list: Pubkey::new_from_array([4; 32]),
             mint: Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
             genesis: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".into(),
             commitment: "confirmed".into(),
@@ -231,6 +234,15 @@ impl Fixture {
             &config.market.to_string(),
             &config.program.to_string(),
             &market_data,
+        );
+        let mut list = vec![0; 120];
+        list[..8].copy_from_slice(b"LIST0V30");
+        list[8..40].copy_from_slice(config.market.as_ref());
+        list[72..76].copy_from_slice(&1u32.to_le_bytes());
+        mock.put(
+            &config.provider_list.to_string(),
+            &config.program.to_string(),
+            &list,
         );
         mock.put(
             &owner_address.to_string(),
@@ -405,6 +417,10 @@ async fn native_api_auth_wallet_precision_and_revocation() {
         .unwrap();
     assert!(!config.to_string().contains("fixture-private-rpc"));
     assert_eq!(config["programId"], fixture.app.config.program.to_string());
+    assert_eq!(
+        config["providerList"],
+        fixture.app.config.provider_list.to_string()
+    );
     assert!(config["opencode"]["maxInputTokens"].as_u64().unwrap() > 0);
     let session = fixture.login().await;
     let access = session["access"].as_str().unwrap();
@@ -759,4 +775,42 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
     fixture.mock.0.online.store(true, Ordering::Relaxed);
     fixture.ready(true).await;
     socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_list_close_arrives_without_program_notification_or_fresh_snapshot() {
+    let fixture = Fixture::new().await;
+    let list = fixture.app.config.provider_list.to_string();
+    let before = fixture.app.index.catalog(&fixture.app.config).await;
+    assert!(before.ready);
+    let floor = fixture.app.index.state.read().await.floor;
+    fixture.mock.0.frozen_rpc.store(floor, Ordering::Relaxed);
+    fixture.mock.0.records.lock().unwrap().remove(&list);
+    fixture.mock.0.slot.fetch_add(1, Ordering::Relaxed);
+    fixture.mock.0.events.send(list.clone()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let closed = fixture
+                .app
+                .index
+                .state
+                .read()
+                .await
+                .accounts
+                .get(&list)
+                .is_some_and(|r| r.data.is_empty());
+            if closed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("explicit list subscription delivers closure");
+    let after = fixture.app.index.catalog(&fixture.app.config).await;
+    assert!(!after.ready);
+    assert!(!Arc::ptr_eq(&before, &after));
+    assert!(after.value["providers"].as_array().unwrap().is_empty());
+    assert_eq!(after.value["providerList"], list);
+    assert_eq!(fixture.app.index.state.read().await.floor, floor);
 }

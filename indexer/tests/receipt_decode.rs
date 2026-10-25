@@ -61,3 +61,45 @@ fn rejects_wrong_market_truncated_claim_mismatched_booking_and_cpi_only() {
     tx["transaction"]["message"]["instructions"] = json!([]);
     assert!(decode(&tx, &program, &market, "signature").is_empty());
 }
+
+#[test]
+fn permissionless_claims_preserve_zero_charges_and_reusable_identity_without_buckets() {
+    let (mut tx, program, market) = fixture();
+    let instruction = &mut tx["transaction"]["message"]["instructions"][0];
+    let old = bs58::decode(instruction["data"].as_str().unwrap())
+        .into_vec()
+        .unwrap();
+    let mut data = [&old[..21], &old[37..]].concat();
+    data[125..133].fill(0);
+    instruction["accounts"].as_array_mut().unwrap().pop();
+    instruction["data"] = bs58::encode(&data).into_string().into();
+    let receipts = decode(&tx, &program, &market, "new-signature");
+    assert_eq!(receipts.len(), 1);
+    let r = &receipts[0];
+    assert_eq!(r.version, 2);
+    assert_eq!(r.charge, "0");
+    assert_eq!(r.epoch, 0);
+    assert_eq!(r.index, 7);
+    assert_eq!(r.bucket, r.booking);
+    assert_eq!(r.deadline, 4000);
+    assert_eq!(r.tokens, 60);
+    for at in [0, 13, 54, 86, 118] {
+        let mut tx = tx.clone();
+        let mut bad = data.clone();
+        bad[at] ^= 1;
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(bad).into_string().into();
+        assert!(decode(&tx, &program, &market, "new-signature").is_empty());
+    }
+    let old = fixture();
+    let old = decode(&old.0, &old.1, &old.2, "old-signature")
+        .pop()
+        .unwrap();
+    assert_eq!(old.version, 1);
+    let mut archived = serde_json::to_value(&old).unwrap();
+    archived.as_object_mut().unwrap().remove("version");
+    assert_eq!(
+        serde_json::from_value::<fossa_indexer::receipts::Receipt>(archived).unwrap(),
+        old
+    );
+}

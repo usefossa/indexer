@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     index::State,
     metadata,
-    protocol::{self, Kind, address, u16_at, u32_at, u64_at},
+    protocol::{self, Kind, address, u16_at, u32_at},
 };
 use axum::{body::Bytes, extract::ws::Utf8Bytes};
 use serde_json::{Value, json};
@@ -16,15 +16,29 @@ pub struct Catalog {
     pub message: Utf8Bytes,
 }
 pub fn build(index: &State, config: &Config) -> Catalog {
-    let ready = index.ready(config);
+    let ready = index.catalog_ready(config);
+    let list = index
+        .accounts
+        .get(&config.provider_list.to_string())
+        .filter(|r| {
+            protocol::validate(&config.provider_list.to_string(), &r.data, config)
+                == Some(Kind::ProviderList)
+        });
+    let members: std::collections::HashSet<&[u8]> = list
+        .map(|r| {
+            r.data[80..80 + u32_at(&r.data, 76) as usize * 32]
+                .chunks_exact(32)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut providers = BTreeMap::new();
     let mut metadata = BTreeMap::new();
     for (id, r) in &index.accounts {
         match protocol::kind(&r.data) {
-            Some(Kind::Provider) => {
+            Some(Kind::Provider) if members.contains(&r.data[40..72]) => {
                 if let Some(doc) = metadata::key(&r.data).and_then(|k| index.documents.get(&k)) {
                     let wallet = address(&r.data, 40);
-                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"approved":r.data[106]==1}));
+                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image")}));
                 }
             }
             Some(Kind::Metadata) => {
@@ -78,22 +92,21 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             let ti = 48 + slot * 120;
             let ci = 48 + slot * 32;
             let wallet = address(t, ti);
-            let provider = providers.get(&wallet).cloned().unwrap_or_else(
-                || json!({"wallet":wallet,"name":"Unknown provider","approved":false}),
-            );
-            let funded = u64_at(c, ci);
-            let exposure = u64_at(c, ci + 8);
+            let Some(provider) = providers.get(&wallet) else {
+                continue;
+            };
             let active = u32_at(c, ci + 16);
             let capacity = u32_at(t, ti + 116);
             let available = ready
                 && t[ti + 111] == 1
-                && t[ti + 112] == 1
-                && provider["approved"] == true
-                && active < capacity
-                && funded > exposure;
-            offers.push(json!({"slot":slot,"provider":provider,"payout":address(t,ti+32),"bondVault":address(t,ti+64),"inputRate":u32_at(t,ti+96),"cachedRate":u32_at(t,ti+100),"outputRate":u32_at(t,ti+104),"speed":u16_at(t,ti+108),"private":t[ti+110]==1,"active":t[ti+111]==1,"approved":t[ti+112]==1,"capacity":capacity,"activeBookings":active,"fundedBond":funded.to_string(),"exposure":exposure.to_string(),"available":available}));
+                && provider["endpoint"].as_str().is_some_and(|s| !s.is_empty())
+                && active < capacity;
+            offers.push(json!({"slot":slot,"provider":provider,"payout":address(t,ti+32),"inputRate":u32_at(t,ti+96),"cachedRate":u32_at(t,ti+100),"outputRate":u32_at(t,ti+104),"speed":u16_at(t,ti+108),"private":t[ti+110]==1,"active":t[ti+111]==1,"capacity":capacity,"activeBookings":active,"available":available}));
         }
-        models.push(json!({"id":model_id,"address":id,"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
+        if offers.is_empty() {
+            continue;
+        }
+        models.push(json!({"id":model_id,"address":id,"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
     }
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let pending = index
@@ -102,7 +115,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         .filter_map(|r| metadata::key(&r.data))
         .filter(|key| !index.documents.contains_key(key))
         .count();
-    let value = json!({"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
+    let value = json!({"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"providerList":config.provider_list.to_string(),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
     let body: Bytes = value.to_string().into();
     let message = format!("{{\"type\":\"catalog\",\"data\":{}}}", value).into();
     Catalog {

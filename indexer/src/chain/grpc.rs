@@ -44,13 +44,22 @@ pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
     let (requests, receiver) = mpsc::channel(8);
     requests
         .send(SubscribeRequest {
-            accounts: std::collections::HashMap::from([(
-                "protocol".into(),
-                SubscribeRequestFilterAccounts {
-                    owner: vec![config.program.to_string()],
-                    ..Default::default()
-                },
-            )]),
+            accounts: std::collections::HashMap::from([
+                (
+                    "protocol".into(),
+                    SubscribeRequestFilterAccounts {
+                        owner: vec![config.program.to_string()],
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "provider_list".into(),
+                    SubscribeRequestFilterAccounts {
+                        account: vec![config.provider_list.to_string()],
+                        ..Default::default()
+                    },
+                ),
+            ]),
             slots: std::collections::HashMap::from([(
                 "clock".into(),
                 SubscribeRequestFilterSlots {

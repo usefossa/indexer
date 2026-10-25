@@ -276,7 +276,7 @@ async fn state_rejects_replay_reconciles_deletes_recovers_and_replaces_at_capaci
 }
 
 #[tokio::test]
-async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_collateral() {
+async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list() {
     let dir = tempfile::tempdir().unwrap();
     let config = common::config(dir.path());
     let app = App::new(config.clone()).await.unwrap();
@@ -297,7 +297,18 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
         Pubkey::find_program_address(&[b"model_metadata", model.as_ref()], &config.program);
     let terms = Pubkey::new_from_array([10; 32]);
     let capacity = Pubkey::new_from_array([11; 32]);
-    let mut rows = vec![(config.market.to_string(), market(&config))];
+    let mut list = vec![0; 160];
+    list[..8].copy_from_slice(b"LIST0V30");
+    list[8..40].copy_from_slice(config.market.as_ref());
+    list[40..72].copy_from_slice(wallet.as_ref());
+    list[72..76].copy_from_slice(&2u32.to_le_bytes());
+    list[76..80].copy_from_slice(&1u32.to_le_bytes());
+    list[80..112].copy_from_slice(wallet.as_ref());
+    list[144..152].copy_from_slice(&((0x08080808u64 << 32) | 28).to_le_bytes());
+    let mut rows = vec![
+        (config.market.to_string(), market(&config)),
+        (config.provider_list.to_string(), list.clone()),
+    ];
     let mut docs = Vec::new();
     for (address, kind, value, base, hash_at, len_at, uri_at) in [
         (
@@ -330,7 +341,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
         data[len_at..len_at + 2].copy_from_slice(&(uri.len() as u16).to_le_bytes());
         data[uri_at..uri_at + uri.len()].copy_from_slice(uri.as_bytes());
         if base == 364 {
-            data[106] = 1;
+            data[106] = 255;
             data[107] = bump;
         } else {
             data[138] = meta_bump;
@@ -352,7 +363,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
     data[40..72].copy_from_slice(&id_hash);
     data[72..104].copy_from_slice(terms.as_ref());
     data[104..136].copy_from_slice(capacity.as_ref());
-    data[136..140].copy_from_slice(&1u32.to_le_bytes());
+    data[136..140].copy_from_slice(&2u32.to_le_bytes());
     data[140] = model_bump;
     assert_eq!(
         protocol::validate(&model.to_string(), &data, &config),
@@ -360,20 +371,22 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
     );
     assert!(protocol::validate(&wallet.to_string(), &data, &config).is_none());
     rows.push((model.to_string(), data));
-    for (address, len, magic) in [(terms, 168, b"TERMSV20"), (capacity, 80, b"CAPACV20")] {
+    for (address, len, magic) in [(terms, 288, b"TERMSV20"), (capacity, 112, b"CAPACV20")] {
         let mut data = vec![0; len];
         data[..8].copy_from_slice(magic);
         data[8..40].copy_from_slice(model.as_ref());
-        data[40..44].copy_from_slice(&1u32.to_le_bytes());
-        data[44..48].copy_from_slice(&1u32.to_le_bytes());
-        if len == 168 {
+        data[40..44].copy_from_slice(&2u32.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes());
+        if len == 288 {
             data[48..80].copy_from_slice(wallet.as_ref());
             data[144..148].copy_from_slice(&100u32.to_le_bytes());
             data[152..156].copy_from_slice(&200u32.to_le_bytes());
             data[156..158].copy_from_slice(&50u16.to_le_bytes());
             data[159] = 1;
-            data[160] = 1;
+            data[160] = 255;
             data[164..168].copy_from_slice(&5u32.to_le_bytes());
+            data.copy_within(48..168, 168);
+            data[168..200].fill(9);
         } else {
             data[48..56].copy_from_slice(&9_007_199_254_740_993u64.to_le_bytes());
         }
@@ -400,9 +413,21 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
     assert!(catalog.ready);
     assert_eq!(catalog.value["models"][0]["id"], "example/model");
     assert_eq!(
-        catalog.value["models"][0]["offers"][0]["fundedBond"],
-        "9007199254740993"
+        catalog.value["providerList"],
+        config.provider_list.to_string()
     );
+    assert_eq!(catalog.value["models"][0]["offerCount"], 2);
+    assert_eq!(
+        catalog.value["models"][0]["offers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for field in ["fundedBond", "exposure", "approved", "bondVault"] {
+        assert!(catalog.value["models"][0]["offers"][0].get(field).is_none());
+    }
+    assert!(catalog.value["providers"][0].get("approved").is_none());
     assert_eq!(catalog.value["models"][0]["offers"][0]["available"], true);
     let unchanged = app
         .index
@@ -442,13 +467,107 @@ async fn verified_catalog_requires_canonical_pdas_hash_book_links_and_exact_coll
     assert!(!Arc::ptr_eq(&catalog, &changed));
     assert_eq!(changed.value["models"][0]["offers"][0]["available"], false);
     assert_eq!(changed.value["models"][0]["offers"][0]["activeBookings"], 5);
+    list[76..80].fill(0);
+    list[80..].fill(0);
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(
+                config.provider_list.to_string(),
+                record(&config, 13, 1, list),
+            )],
+            None,
+        )
+        .await
+        .unwrap();
+    let removed = app.index.catalog(&config).await;
+    assert!(removed.ready);
+    assert!(removed.value["providers"].as_array().unwrap().is_empty());
+    assert!(removed.value["models"].as_array().unwrap().is_empty());
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(config.provider_list.to_string(), Record::closed(14, 2))],
+            None,
+        )
+        .await
+        .unwrap();
+    let missing = app.index.catalog(&config).await;
+    assert!(!missing.ready);
+    assert!(missing.value["models"].as_array().unwrap().is_empty());
+    assert!(Arc::ptr_eq(&missing, &app.index.catalog(&config).await));
+    let profile = fossa_indexer::api::wallet::provider(
+        axum::extract::State(app.clone()),
+        axum::extract::Path(wallet.to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(profile.0["provider"]["wallet"], wallet.to_string());
+    assert_eq!(
+        profile.0["provider"]["endpoint"],
+        "https://example.com/v1/chat/completions"
+    );
     app.index.connected(false).await;
     let catalog = app.index.catalog(&config).await;
     assert!(!Arc::ptr_eq(&catalog, &changed));
     assert!(!catalog.ready);
-    assert_eq!(catalog.value["models"][0]["offers"][0]["available"], false);
+    assert!(catalog.value["models"].as_array().unwrap().is_empty());
     assert!(
         protocol::bytes(&json!({"data":[STANDARD.encode([0u8;10]),"base64"],"executable":true}))
             .is_none()
     );
+}
+
+#[test]
+fn provider_lists_reject_malformed_foreign_unsorted_duplicate_and_zero_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let mut list = vec![0; 200];
+    list[..8].copy_from_slice(b"LIST0V30");
+    list[8..40].copy_from_slice(config.market.as_ref());
+    list[72..76].copy_from_slice(&3u32.to_le_bytes());
+    list[76..80].copy_from_slice(&2u32.to_le_bytes());
+    list[80..112].fill(5);
+    list[112..144].fill(6);
+    list[176..184].copy_from_slice(&((0x06060606u64 << 32) | 32).to_le_bytes());
+    list[184..192].copy_from_slice(&((0x05050505u64 << 32) | 28).to_le_bytes());
+    assert_eq!(
+        protocol::validate(&config.provider_list.to_string(), &list, &config),
+        Some(Kind::ProviderList)
+    );
+    let mut bad = list.clone();
+    bad.push(0);
+    assert!(protocol::kind(&bad).is_none());
+    for (start, end, value) in [
+        (8, 40, 9),
+        (72, 76, 0),
+        (76, 80, 255),
+        (112, 144, 5),
+        (112, 144, 4),
+        (80, 112, 0),
+        (144, 145, 1),
+        (176, 177, 1),
+        (178, 179, 255),
+        (180, 184, 7),
+        (184, 185, 0),
+        (192, 193, 1),
+    ] {
+        let mut bad = list.clone();
+        bad[start..end].fill(value);
+        assert!(protocol::validate(&config.provider_list.to_string(), &bad, &config).is_none());
+    }
+    list[76..80].copy_from_slice(&3u32.to_le_bytes());
+    for (index, value) in [255u32, 256, 0x80000000].into_iter().enumerate() {
+        list[80 + index * 32..108 + index * 32].fill(1);
+        list[108 + index * 32..112 + index * 32].copy_from_slice(&value.to_be_bytes());
+    }
+    for (node, index, value) in [(0, 1, 256u64), (1, 0, 255), (2, 2, 0x80000000)] {
+        list[176 + node * 8..184 + node * 8]
+            .copy_from_slice(&((value << 32) | (index << 5) | 28).to_le_bytes());
+    }
+    assert_eq!(protocol::kind(&list), Some(Kind::ProviderList));
+    list[176..184].copy_from_slice(&((0x01010101u64 << 32) | 32 | 24).to_le_bytes());
+    assert!(protocol::kind(&list).is_none());
 }

@@ -32,6 +32,11 @@ impl geyser_server::Geyser for Mock {
         let first = input.message().await?.unwrap();
         assert_eq!(first.commitment, Some(CommitmentLevel::Confirmed as i32));
         assert_eq!(first.accounts["protocol"].owner, vec![self.program.clone()]);
+        assert_eq!(
+            first.accounts["provider_list"].account,
+            vec![Pubkey::new_from_array([4; 32]).to_string()]
+        );
+        assert!(first.accounts["provider_list"].owner.is_empty());
         assert!(first.from_slot.is_none());
         assert!(first.slots["clock"].filter_by_commitment.unwrap());
         let (tx, rx) = mpsc::channel(8);
@@ -51,6 +56,17 @@ impl geyser_server::Geyser for Mock {
                         lamports: 55,
                         data: vec![2; 72],
                         write_version: 9,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                UpdateOneof::Account(SubscribeUpdateAccount {
+                    slot: 102,
+                    account: Some(SubscribeUpdateAccountInfo {
+                        pubkey: vec![4; 32],
+                        owner: vec![0; 32],
+                        lamports: 0,
+                        write_version: 10,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -166,6 +182,7 @@ async fn provider_neutral_wire_handles_optional_token_commitment_accounts_and_pi
             database: "unused".into(),
             program,
             market: Pubkey::new_from_array([2; 32]),
+            provider_list: Pubkey::new_from_array([4; 32]),
             mint: Pubkey::new_from_array([3; 32]),
             genesis: "test".into(),
             commitment: "confirmed".into(),
@@ -192,6 +209,12 @@ async fn provider_neutral_wire_handles_optional_token_commitment_accounts_and_pi
             assert_eq!(records[0].1.version, 9);
             assert_eq!(records[0].1.lamports, 55);
             assert_eq!(records[0].1.data.as_ref(), &[2; 72]);
+            let Some(Event::Accounts(closed)) = rx.recv().await else {
+                panic!("missing list close")
+            };
+            assert_eq!(closed[0].0, Pubkey::new_from_array([4; 32]).to_string());
+            assert!(closed[0].1.data.is_empty());
+            assert_eq!(closed[0].1.lamports, 0);
             while !ping.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }

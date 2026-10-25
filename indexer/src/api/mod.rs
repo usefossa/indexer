@@ -113,7 +113,7 @@ async fn health(State(app): State<App>) -> impl IntoResponse {
 }
 async fn config(State(app): State<App>) -> Json<Value> {
     Json(
-        json!({"programId":app.config.program.to_string(),"market":app.config.market.to_string(),"usdcMint":app.config.mint.to_string(),"solanaRpc":format!("{}/v1/opencode/rpc",app.config.public_url),"liveUrl":format!("{}/v1/opencode/live",app.config.public_url.replacen("http","ws",1)),"opencode":{"siteUrl":app.config.public_url,"deviceTtlSecs":120,"maxInputTokens":4_194_304,"maxRequestBytes":16_777_216,"catalogMaxAgeMs":10_000,"requestTimeoutMs":180_000,"pollIntervalMs":1000,"mainnetGenesisHash":app.config.genesis,"localBookingPoolSize":2,"manualImport":true,"deviceConnect":false}}),
+        json!({"programId":app.config.program.to_string(),"market":app.config.market.to_string(),"providerList":app.config.provider_list.to_string(),"usdcMint":app.config.mint.to_string(),"solanaRpc":format!("{}/v1/opencode/rpc",app.config.public_url),"liveUrl":format!("{}/v1/opencode/live",app.config.public_url.replacen("http","ws",1)),"opencode":{"siteUrl":app.config.public_url,"deviceTtlSecs":120,"maxInputTokens":4_194_304,"maxRequestBytes":16_777_216,"catalogMaxAgeMs":10_000,"requestTimeoutMs":180_000,"pollIntervalMs":1000,"mainnetGenesisHash":app.config.genesis,"localBookingPoolSize":2,"manualImport":true,"deviceConnect":false}}),
     )
 }
 async fn catalog(State(app): State<App>) -> impl IntoResponse {

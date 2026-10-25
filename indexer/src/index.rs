@@ -86,6 +86,7 @@ fn catalog_account(record: &Record) -> bool {
                 | Kind::Metadata
                 | Kind::Terms
                 | Kind::Capacity
+                | Kind::ProviderList
         )
     )
 }
@@ -107,6 +108,13 @@ fn track_booking(
     }
 }
 impl State {
+    pub fn catalog_ready(&self, config: &Config) -> bool {
+        self.ready(config)
+            && self
+                .accounts
+                .get(&config.provider_list.to_string())
+                .is_some_and(|r| r.data.starts_with(b"LIST0V30"))
+    }
     pub fn ready(&self, config: &Config) -> bool {
         self.connected
             && self
@@ -218,14 +226,14 @@ impl Index {
         {
             let s = self.state.read().await;
             if let Some(c) = &s.cached
-                && c.ready == s.ready(config)
+                && c.ready == s.catalog_ready(config)
             {
                 return c.clone();
             }
         }
         let mut s = self.state.write().await;
         if let Some(c) = &s.cached
-            && c.ready == s.ready(config)
+            && c.ready == s.catalog_ready(config)
         {
             return c.clone();
         }

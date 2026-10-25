@@ -13,6 +13,7 @@ pub struct Config {
     pub database: PathBuf,
     pub program: Pubkey,
     pub market: Pubkey,
+    pub provider_list: Pubkey,
     pub mint: Pubkey,
     pub genesis: String,
     pub commitment: String,
@@ -58,6 +59,10 @@ impl Config {
             market: key(
                 "FOSSA_MARKET",
                 "8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som",
+            )?,
+            provider_list: key(
+                "FOSSA_PROVIDER_LIST",
+                "CCgnXjgpVfNcFrZpFUYaepySTSfHxuqxPKej5D94zhc6",
             )?,
             mint: key(
                 "FOSSA_USDC_MINT",

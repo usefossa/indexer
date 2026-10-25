@@ -13,6 +13,7 @@ pub fn config(path: &Path) -> Config {
         database: path.join("indexer.sqlite"),
         program: Pubkey::new_from_array([1; 32]),
         market: Pubkey::new_from_array([2; 32]),
+        provider_list: Pubkey::new_from_array([4; 32]),
         mint: Pubkey::new_from_array([3; 32]),
         genesis: "mock-genesis".into(),
         commitment: "confirmed".into(),
