@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fossa.ag/schemas/metadata/v1.json",
-  "title": "Fossa provider, model and provider group metadata v1",
+  "title": "Fossa provider, model and provider list metadata v1",
   "description": "UTF-8 JSON without BOM, at most 32768 bytes and 64 object/array nesting levels, with Unicode scalar strings and finite numbers. Validate the definition selected by the on-chain account kind. Missing schemaVersion means 1. Provider and model documents permit extensions; list fields are strict. See /docs/technical/metadata for semantic and account-binding rules.",
   "anyOf": [{ "$ref": "#/$defs/provider" }, { "$ref": "#/$defs/model" }, { "$ref": "#/$defs/list" }],
   "$defs": {
@@ -33,14 +33,14 @@
       "properties": {
         "$schema": { "const": "https://fossa.ag/schemas/metadata/v1.json#/$defs/list" },
         "schemaVersion": { "const": 1, "default": 1 },
-        "name": { "$ref": "#/$defs/name", "description": "Provider group display name." },
+        "name": { "$ref": "#/$defs/name", "description": "Provider list display name." },
         "accentColor": { "type": "string", "minLength": 7, "maxLength": 7, "pattern": "^#[0-9a-fA-F]{6}$", "description": "Six-digit hexadecimal accent color." },
         "image": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }], "description": "Optional HTTPS profile image URL." },
         "website": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }], "description": "Optional HTTPS website URL." },
         "icon": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }], "description": "Optional HTTPS URL for a simple all-white SVG icon, designed to remain clear at small sizes. Separate from the profile image; clients tint it using accentColor." }
       },
       "additionalProperties": false,
-      "examples": [{ "$schema": "https://fossa.ag/schemas/metadata/v1.json#/$defs/list", "schemaVersion": 1, "name": "Example Group", "accentColor": "#8B7ACF", "image": "https://group.example.com/profile.png", "website": "https://group.example.com", "icon": "https://group.example.com/icon.svg" }]
+      "examples": [{ "$schema": "https://fossa.ag/schemas/metadata/v1.json#/$defs/list", "schemaVersion": 1, "name": "Example List", "accentColor": "#8B7ACF", "image": "https://list.example.com/profile.png", "website": "https://list.example.com", "icon": "https://list.example.com/icon.svg" }]
     },
     "model": {
       "type": "object",
