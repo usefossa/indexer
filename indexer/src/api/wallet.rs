@@ -100,7 +100,11 @@ async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Va
         }
         free = u64_at(&data, 72);
         let mut bytes = [0; 8];
-        bytes[..7].copy_from_slice(&data[113..120]);
+        if data.len() == 128 {
+            bytes.copy_from_slice(&data[112..120]);
+        } else {
+            bytes[..7].copy_from_slice(&data[113..120]);
+        }
         generation = u64::from_le_bytes(bytes);
         true
     };
@@ -183,7 +187,7 @@ pub async fn user_orders(app: &App, wallet: &str, lane: Option<&str>) -> Vec<Val
         {
             continue;
         }
-        orders.push(json!({"address":id,"slot":r.slot,"provider":address(d,40),"model":address(d,224),"lane":address(d,192),"generation":u64_at(d,152).to_string(),"offerSlot":u32_at(d,352),"status":d[148],"reserve":u64_at(d,104).to_string(),"charge":u64_at(d,160).to_string(),"uncachedTokens":u32_at(d,168),"cachedTokens":u32_at(d,172),"outputTokens":u32_at(d,176),"claimEnd":i64_at(d,132),"providerList":address(d,320)}));
+        orders.push(json!({"address":id,"slot":r.slot,"provider":address(d,40),"model":address(d,224),"lane":address(d,192),"generation":u64_at(d,152).to_string(),"offerSlot":u32_at(d,352),"status":d[148],"reserve":u64_at(d,104).to_string(),"charge":u64_at(d,160).to_string(),"uncachedTokens":u32_at(d,168),"cachedTokens":u32_at(d,172),"outputTokens":u32_at(d,176),"claimEnd":i64_at(d,132),"providerList":address(d,320),"fees":protocol::booking_fees(d)}));
     }
     orders.sort_by_key(|v| std::cmp::Reverse(v["slot"].as_u64().unwrap_or(0)));
     orders

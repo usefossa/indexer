@@ -102,7 +102,9 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
             {
                 return None;
             }
-            let accounts = ix["accounts"].as_array().filter(|a| a.len() == 9)?;
+            let accounts = ix["accounts"]
+                .as_array()
+                .filter(|a| [9, 10].contains(&a.len()))?;
             let key = |i: usize| {
                 keys.get(usize::try_from(accounts.get(i)?.as_u64()?).ok()?)
                     .filter(|k| k.len() == 32)
@@ -112,17 +114,29 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
                 return None;
             }
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
-            if data.first() != Some(&6) || ![108, 116].contains(&data.len()) {
-                return None;
-            }
-            let generation = if data.len() == 116 {
-                u64_at(&data, 108)
+            let native = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
+            let generation = if native && accounts.len() == 10 {
+                match (data.len(), data.get(115)) {
+                    (116, Some(0)) => 0,
+                    (124, Some(1)) if u64_at(&data, 116) > 0 => u64_at(&data, 116),
+                    _ => return None,
+                }
+            } else if accounts.len() == 9
+                && data.first() == Some(&6)
+                && [108, 116].contains(&data.len())
+            {
+                let generation = if data.len() == 116 {
+                    u64_at(&data, 108)
+                } else {
+                    0
+                };
+                if generation >= 1 << 56 {
+                    return None;
+                }
+                generation
             } else {
-                0
-            };
-            if generation >= 1 << 56 {
                 return None;
-            }
+            };
             Some(BookingList {
                 booking: key(6)?,
                 generation: generation.to_string(),
@@ -154,7 +168,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let accounts = ix["accounts"].as_array()?;
-            if ![11, 12].contains(&accounts.len()) {
+            if ![11, 12, 13].contains(&accounts.len()) {
                 return None;
             }
             let key = |i: usize| {
@@ -165,10 +179,19 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
-            let version = match (data.len(), accounts.len(), data.first()) {
-                (141, 11, Some(7)) => 2,
-                (157, 12, Some(7)) => 1,
-                _ => return None,
+            let native = data.starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR);
+            let version = if native
+                && data.len() == 141
+                && data[20] == 1
+                && [11, 13].contains(&accounts.len())
+            {
+                2
+            } else {
+                match (data.len(), accounts.len(), data.first()) {
+                    (141, 11, Some(7)) => 2,
+                    (157, 12, Some(7)) => 1,
+                    _ => return None,
+                }
             };
             let r = &data[if version == 2 { 21 } else { 37 }..];
             let index = if version == 2 {
@@ -181,8 +204,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
             if r[32..64] != *key(3)?
                 || r[64..96] != *key(4)?
                 || generation == 0
-                || generation != u64_at(&data, 13)
-                || generation >= 1 << 56
+                || !native && (generation != u64_at(&data, 13) || generation >= 1 << 56)
                 || version == 1 && (charge == 0 || index >= 65535)
             {
                 return None;
@@ -208,7 +230,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 time: tx["blockTime"].as_i64().unwrap_or_else(|| {
                     deadline.saturating_sub(if version == 2 { 300 } else { 3900 })
                 }),
-                tokens: [1, 5, 9]
+                tokens: if native { [8, 12, 16] } else { [1, 5, 9] }
                     .into_iter()
                     .map(|at| u32_at(&data, at) as u64)
                     .sum(),

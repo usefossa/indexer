@@ -39,6 +39,113 @@ fn booking(config: &fossa_indexer::config::Config, status: u8) -> Vec<u8> {
     data
 }
 
+fn group(config: &fossa_indexer::config::Config) -> (Pubkey, Vec<u8>) {
+    let id = [42; 32];
+    let (address, bump) = Pubkey::find_program_address(
+        &[b"model_group", config.market.as_ref(), &id],
+        &config.program,
+    );
+    let mint =
+        Pubkey::find_program_address(&[b"reserve_mint", address.as_ref()], &config.program).0;
+    let mut data = vec![0; 144];
+    data[..8].copy_from_slice(&Sha256::digest(b"account:ModelGroup")[..8]);
+    data[8..40].copy_from_slice(config.market.as_ref());
+    data[40..72].copy_from_slice(&id);
+    data[72..104].fill(43);
+    data[104..136].copy_from_slice(mint.as_ref());
+    data[136] = 1;
+    data[137] = bump;
+    (address, data)
+}
+
+#[tokio::test]
+async fn native_groups_and_market_policy_survive_restart_and_invalidate_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let app = App::new(config.clone()).await.unwrap();
+    let (address, mut data) = group(&config);
+    assert_eq!(
+        protocol::validate(&address.to_string(), &data, &config),
+        Some(Kind::ModelGroup)
+    );
+    for offset in [8, 40, 104, 137, 138] {
+        let mut bad = data.clone();
+        bad[offset] ^= 1;
+        assert!(protocol::validate(&address.to_string(), &bad, &config).is_none());
+    }
+    let mut bad = data.clone();
+    bad[72..104].fill(0);
+    assert!(protocol::validate(&address.to_string(), &bad, &config).is_none());
+    bad = data.clone();
+    bad[136] = 2;
+    assert!(protocol::kind(&bad).is_none());
+    let mut market = market(&config);
+    market.resize(248, 0);
+    market[..8].copy_from_slice(&protocol::MARKET_DISCRIMINATOR);
+    market[8..40].fill(44);
+    market[72..104].fill(45);
+    market[168..176].copy_from_slice(&u64::MAX.to_le_bytes());
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![
+                (config.market.to_string(), record(&config, 10, 0, market)),
+                (address.to_string(), record(&config, 10, 0, data.clone())),
+            ],
+            Some(10),
+        )
+        .await
+        .unwrap();
+    let catalog = app.index.catalog(&config).await;
+    assert_eq!(
+        catalog.value["marketConfig"]["creationNetPrice"],
+        u64::MAX.to_string()
+    );
+    assert_eq!(catalog.value["marketConfig"]["creationEnabled"], false);
+    assert!(catalog.value["marketConfig"]["creationMint"].is_null());
+    assert!(catalog.value["marketConfig"]["dexProgram"].is_null());
+    assert_eq!(
+        catalog.value["modelGroups"][0]["address"],
+        address.to_string()
+    );
+    assert_eq!(catalog.value["modelGroups"][0]["routeToReserve"], true);
+    data[136] = 0;
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(address.to_string(), record(&config, 11, 1, data))],
+            None,
+        )
+        .await
+        .unwrap();
+    let changed = app.index.catalog(&config).await;
+    assert!(!Arc::ptr_eq(&catalog, &changed));
+    assert_eq!(changed.value["modelGroups"][0]["routeToReserve"], false);
+    drop(app);
+    let app = App::new(config.clone()).await.unwrap();
+    assert_eq!(
+        app.index.catalog(&config).await.value["modelGroups"],
+        changed.value["modelGroups"]
+    );
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(address.to_string(), Record::closed(12, 2))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        app.index.catalog(&config).await.value["modelGroups"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn booking_ownership_index_tracks_replacement_close_and_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -467,6 +574,49 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     assert!(!Arc::ptr_eq(&catalog, &changed));
     assert_eq!(changed.value["models"][0]["offers"][0]["available"], false);
     assert_eq!(changed.value["models"][0]["offers"][0]["activeBookings"], 5);
+    let (group_address, group_data) = group(&config);
+    let mut grouped_model = app.index.state.read().await.accounts[&model.to_string()]
+        .data
+        .to_vec();
+    grouped_model.resize(176, 0);
+    grouped_model[..8].copy_from_slice(&protocol::MODEL_DISCRIMINATOR);
+    grouped_model[144..176].copy_from_slice(group_address.as_ref());
+    let mut capacity_data = app.index.state.read().await.accounts[&capacity.to_string()]
+        .data
+        .to_vec();
+    capacity_data[64..68].fill(0);
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![
+                (model.to_string(), record(&config, 12, 2, grouped_model)),
+                (capacity.to_string(), record(&config, 12, 2, capacity_data)),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        app.index.catalog(&config).await.value["models"][0]["offers"][0]["available"],
+        false
+    );
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(
+                group_address.to_string(),
+                record(&config, 12, 3, group_data),
+            )],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        app.index.catalog(&config).await.value["models"][0]["offers"][0]["available"],
+        true
+    );
     list[76..80].fill(0);
     list[80..].fill(0);
     app.index
@@ -573,4 +723,61 @@ fn provider_lists_reject_malformed_foreign_unsorted_duplicate_and_zero_members()
     assert_eq!(protocol::kind(&list), Some(Kind::ProviderList));
     list[200..208].reverse();
     assert!(protocol::kind(&list).is_none());
+}
+
+#[test]
+fn native_accounts_preserve_bindings_and_validate_list_fees_without_legacy_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let mut native_market = market(&config);
+    native_market.resize(248, 0);
+    native_market[..8].copy_from_slice(&Sha256::digest(b"account:Market")[..8]);
+    assert_eq!(
+        protocol::validate(&config.market.to_string(), &native_market, &config),
+        Some(Kind::Market)
+    );
+    let lane = Pubkey::new_from_array([25; 32]);
+    let mut user = vec![0; 128];
+    user[..8].copy_from_slice(&Sha256::digest(b"account:User")[..8]);
+    user[40..72].copy_from_slice(config.market.as_ref());
+    user[80..112].copy_from_slice(protocol::vault(&lane, &config).as_ref());
+    user[112..120].copy_from_slice(&u64::MAX.to_le_bytes());
+    user[120] = Pubkey::find_program_address(&[b"vault", lane.as_ref()], &config.program).1;
+    assert_eq!(
+        protocol::validate(&lane.to_string(), &user, &config),
+        Some(Kind::User)
+    );
+    user[120] ^= 1;
+    assert_eq!(protocol::validate(&lane.to_string(), &user, &config), None);
+    let mut list = vec![0; 88 + 3 * 32];
+    list[..8].copy_from_slice(&Sha256::digest(b"account:List")[..8]);
+    list[8..40].copy_from_slice(config.market.as_ref());
+    list[72..76].copy_from_slice(&3u32.to_le_bytes());
+    list[76..78].copy_from_slice(&100u16.to_le_bytes());
+    list[78..80].copy_from_slice(&10000u16.to_le_bytes());
+    list[84..88].copy_from_slice(&2u32.to_le_bytes());
+    list[88..120].fill(1);
+    list[120..152].fill(2);
+    assert_eq!(
+        protocol::validate(&config.provider_list.to_string(), &list, &config),
+        Some(Kind::ProviderList)
+    );
+    assert_eq!(protocol::list_fees(&list), Some((100, 10000)));
+    assert_eq!(protocol::list_members(&list).len(), 64);
+    for (offset, value) in [(76, 9u16), (76, 301), (78, 4999), (78, 10001)] {
+        let mut invalid = list.clone();
+        invalid[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(protocol::kind(&invalid), None);
+    }
+    let mut invalid = list.clone();
+    invalid[120..152].fill(1);
+    assert_eq!(protocol::kind(&invalid), None);
+    list[152] = 1;
+    assert_eq!(protocol::kind(&list), None);
+    let mut native_booking = booking(&config, 5);
+    native_booking.resize(472, 0);
+    native_booking[..8].copy_from_slice(&Sha256::digest(b"account:Booking")[..8]);
+    assert_eq!(protocol::kind(&native_booking), Some(Kind::Booking));
+    native_booking.pop();
+    assert_eq!(protocol::kind(&native_booking), None);
 }

@@ -83,6 +83,7 @@ fn catalog_account(record: &Record) -> bool {
         Some(
             Kind::Market
                 | Kind::Model
+                | Kind::ModelGroup
                 | Kind::Provider
                 | Kind::Metadata
                 | Kind::Terms
@@ -123,7 +124,7 @@ impl State {
             && self
                 .accounts
                 .get(&config.provider_list.to_string())
-                .is_some_and(|r| r.data.starts_with(b"LIST0V30"))
+                .is_some_and(|r| protocol::kind(&r.data) == Some(Kind::ProviderList))
     }
     pub fn ready(&self, config: &Config) -> bool {
         self.connected

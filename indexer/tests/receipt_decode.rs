@@ -154,3 +154,65 @@ fn booking_list_attribution_decodes_only_successful_exact_top_level_reservations
     tx["transaction"]["message"]["instructions"][0]["accounts"][8] = 999.into();
     assert!(decode_bookings(&tx, &program, &market).is_empty());
 }
+
+#[test]
+fn native_receipts_decode_full_generation_with_pinned_fee_accounts_and_borsh_option() {
+    use sha2::{Digest, Sha256};
+    let (mut tx, program, market) = fixture();
+    let instruction = &mut tx["transaction"]["message"]["instructions"][0];
+    let old = bs58::decode(instruction["data"].as_str().unwrap())
+        .into_vec()
+        .unwrap();
+    let mut data = [
+        &Sha256::digest(b"global:claim_booking")[..8],
+        &old[1..13],
+        &[1],
+        &old[37..],
+    ]
+    .concat();
+    data[117..125].copy_from_slice(&u64::MAX.to_le_bytes());
+    instruction["accounts"] = json!([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 8, 12]);
+    instruction["data"] = bs58::encode(&data).into_string().into();
+    let receipt = decode(&tx, &program, &market, "native").pop().unwrap();
+    assert_eq!(receipt.generation, u64::MAX.to_string());
+    assert_eq!(receipt.charge, "9007199254740993");
+    assert_eq!(receipt.tokens, 60);
+    assert_eq!(
+        receipt.lane().unwrap(),
+        Pubkey::new_from_array([4; 32]).to_string()
+    );
+    for offset in [0, 20, 53, 85] {
+        let mut invalid = tx.clone();
+        let mut bytes = data.clone();
+        bytes[offset] ^= 1;
+        invalid["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(bytes).into_string().into();
+        assert!(decode(&invalid, &program, &market, "invalid").is_empty());
+    }
+}
+
+#[test]
+fn native_booking_attribution_reads_full_u64_after_option_tag() {
+    use fossa_indexer::receipts::decode_bookings;
+    use sha2::{Digest, Sha256};
+    let (mut tx, program, market) = fixture();
+    let mut data = vec![0; 124];
+    data[..8].copy_from_slice(&Sha256::digest(b"global:reserve_booking")[..8]);
+    data[115] = 1;
+    data[116..124].copy_from_slice(&u64::MAX.to_le_bytes());
+    let instruction = &mut tx["transaction"]["message"]["instructions"][0];
+    instruction["accounts"] = json!([0, 1, 2, 3, 4, 5, 7, 8, 9, 6]);
+    instruction["data"] = bs58::encode(&data).into_string().into();
+    assert_eq!(
+        decode_bookings(&tx, &program, &market)[0].generation,
+        u64::MAX.to_string()
+    );
+    data[116..124].fill(0);
+    tx["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(&data).into_string().into();
+    assert!(decode_bookings(&tx, &program, &market).is_empty());
+    data[115] = 0;
+    tx["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(data).into_string().into();
+    assert!(decode_bookings(&tx, &program, &market).is_empty());
+}

@@ -30,11 +30,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 == Some(Kind::ProviderList)
         });
     let members: std::collections::HashSet<&[u8]> = list
-        .map(|r| {
-            r.data[80..80 + u32_at(&r.data, 76) as usize * 32]
-                .chunks_exact(32)
-                .collect()
-        })
+        .map(|r| protocol::list_members(&r.data).chunks_exact(32).collect())
         .unwrap_or_default();
     let mut providers = BTreeMap::new();
     let mut metadata = BTreeMap::new();
@@ -53,11 +49,27 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         }
     }
     let mut models = Vec::new();
+    let groups: BTreeMap<_, _> = index
+        .accounts
+        .iter()
+        .filter(|(_, record)| protocol::kind(&record.data) == Some(Kind::ModelGroup))
+        .map(|(id, record)| (id.clone(), protocol::model_group(&record.data, id)))
+        .collect();
+    let market_config = index
+        .accounts
+        .get(&config.market.to_string())
+        .and_then(|record| protocol::market_config(&record.data));
     for (id, r) in &index.accounts {
         let d = &r.data;
         if protocol::kind(d) != Some(Kind::Model) {
             continue;
         }
+        let group = (d.len() == 176)
+            .then(|| protocol::optional_address(d, 144))
+            .flatten();
+        let group_ready = group
+            .as_ref()
+            .is_none_or(|group| groups.contains_key(group));
         let Some(doc) = metadata
             .get(id)
             .and_then(|r| metadata::key(&r.data))
@@ -103,6 +115,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             let active = u32_at(c, ci + 16);
             let capacity = u32_at(t, ti + 116);
             let available = ready
+                && group_ready
                 && t[ti + 111] == 1
                 && provider["endpoint"].as_str().is_some_and(|s| !s.is_empty())
                 && active < capacity;
@@ -111,7 +124,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         if offers.is_empty() {
             continue;
         }
-        models.push(json!({"id":model_id,"address":id,"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
+        models.push(json!({"id":model_id,"address":id,"group":if d.len() == 176 && d[144..176] != [0;32] {Some(address(d,144))} else {None},"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
     }
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let pending = index
@@ -120,7 +133,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         .filter_map(|r| metadata::key(&r.data))
         .filter(|key| !index.documents.contains_key(key))
         .count();
-    let value = json!({"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"providerList":config.provider_list.to_string(),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
+    let value = json!({"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"marketConfig":market_config,"modelGroups":groups.into_values().collect::<Vec<_>>(),"providerList":config.provider_list.to_string(),"providerListFeeBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.0),"providerListProtocolShareBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.1),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
     let body: Bytes = value.to_string().into();
     let message = format!("{{\"type\":\"catalog\",\"data\":{}}}", value).into();
     Catalog {

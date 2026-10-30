@@ -64,10 +64,18 @@ pub fn decode(tx: &Value, program: &str, market: &str, mint: &str) -> Result<Vec
         else {
             continue;
         };
+        let native_reserve = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
+        let native_claim = data.starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR);
         let charge = match (data.first(), data.len(), accounts.len()) {
+            (_, 116, 10) if native_reserve && data[115] == 0 => None,
+            (_, 21, 11 | 13) if native_claim && data[20] == 0 => Some(
+                transfer_charge(tx, index, &keys, &accounts[6], None, mint).ok_or(
+                    Error::unavailable("Settlement transfer history unavailable"),
+                )?,
+            ),
             (Some(6), 108 | 116, 8 | 9) if data.len() == 108 || u64_at(&data, 108) == 0 => None,
             (Some(7), 13, 11) => Some(
-                transfer_charge(tx, index, &keys, &accounts[6], &accounts[7], mint).ok_or(
+                transfer_charge(tx, index, &keys, &accounts[6], Some(&accounts[7]), mint).ok_or(
                     Error::unavailable("Settlement transfer history unavailable"),
                 )?,
             ),
@@ -87,7 +95,7 @@ fn transfer_charge(
     index: usize,
     keys: &[String],
     source: &str,
-    payout: &str,
+    payout: Option<&str>,
     mint: &str,
 ) -> Option<u64> {
     let mut charge = 0u64;
@@ -111,7 +119,10 @@ fn transfer_charge(
             (Some(12), 10) if account(1) == Some(mint) && data[9] == 6 => account(2),
             _ => continue,
         };
-        if account(0) == Some(source) && target == Some(payout) {
+        if account(0) == Some(source)
+            && target.is_some()
+            && payout.is_none_or(|payout| target == Some(payout))
+        {
             charge = charge.checked_add(u64_at(&data, 1))?;
         }
     }
@@ -158,10 +169,17 @@ pub fn store(
     for event in events {
         let id = format!("{signature}:{}", event.ix);
         if let Some(charge) = event.charge {
-            let tokens = [1, 5, 9]
-                .into_iter()
-                .map(|at| u32_at(&event.data, at) as u64)
-                .sum::<u64>();
+            let tokens = if event
+                .data
+                .starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR)
+            {
+                [8, 12, 16]
+            } else {
+                [1, 5, 9]
+            }
+            .into_iter()
+            .map(|at| u32_at(&event.data, at) as u64)
+            .sum::<u64>();
             tx.execute("INSERT OR IGNORE INTO one_shot_claims(id,booking,lane,model,provider,slot,tx_order,ix,time,tokens,charge) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![id,event.accounts[4],event.accounts[3],event.accounts[1],event.accounts[5],slot,order,event.ix,time,tokens.to_string(),charge.to_string()])?;
         } else {
             tx.execute("UPDATE one_shot_claims SET assigned=0 WHERE assigned=-1 AND booking=?1 AND lane=?2",params![event.accounts[6],event.accounts[4]])?;

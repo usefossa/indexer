@@ -3,7 +3,7 @@ use crate::{
     error::{Error, Result},
     index::State as IndexState,
     metadata,
-    protocol::{self, Kind, address, u32_at},
+    protocol::{self, Kind, address},
     usage,
 };
 use axum::{
@@ -32,10 +32,10 @@ pub struct List {
 }
 impl List {
     fn members(&self) -> impl Iterator<Item = &[u8]> {
-        self.data[80..80 + u32_at(&self.data, 76) as usize * 32].chunks_exact(32)
+        protocol::list_members(&self.data).chunks_exact(32)
     }
     fn contains(&self, needle: &[u8]) -> bool {
-        let keys = &self.data[80..80 + u32_at(&self.data, 76) as usize * 32];
+        let keys = protocol::list_members(&self.data);
         let (mut low, mut high) = (0, keys.len() / 32);
         while low < high {
             let mid = low + (high - low) / 2;
@@ -92,7 +92,7 @@ impl Directory {
             if protocol::kind(d)!=Some(Kind::ProviderList) {return None;}
             let doc=metadata.get(id).filter(|(md,_)|md[8..40]==d[8..40]&&md[72..104]==d[40..72]).map(|(_,doc)|*doc);
             let value=|key:&str|doc.and_then(|d|d.get(key)).cloned().unwrap_or(Value::Null);
-            let summary=json!({"address":id,"authority":address(d,40),"name":doc.and_then(|d|d["name"].as_str()).map(str::to_owned).unwrap_or_else(||short(id)),"image":value("image"),"icon":value("icon"),"website":value("website"),"accentColor":doc.and_then(|d|d["accentColor"].as_str()).unwrap_or("#94A3B8"),"providerCount":u32_at(d,76)});
+            let summary=json!({"address":id,"authority":address(d,40),"name":doc.and_then(|d|d["name"].as_str()).map(str::to_owned).unwrap_or_else(||short(id)),"image":value("image"),"icon":value("icon"),"website":value("website"),"accentColor":doc.and_then(|d|d["accentColor"].as_str()).unwrap_or("#94A3B8"),"providerCount":protocol::list_members(d).len()/32,"feeBps":protocol::list_fees(d).map(|fees|fees.0),"protocolShareBps":protocol::list_fees(d).map(|fees|fees.1)});
             Some((id.clone(),List{summary,data:d.clone(),hash:metadata.get(id).map(|(d,_)|hex::encode(&d[104..136])).unwrap_or_default()}))
         }).collect();
         Self {

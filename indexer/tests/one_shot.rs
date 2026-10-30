@@ -260,3 +260,45 @@ async fn one_shot_instruction_order_keeps_recreated_bookings_in_one_transaction_
         );
     }
 }
+
+#[tokio::test]
+async fn native_one_shot_usage_includes_pinned_fee_transfers() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(common::config(dir.path())).await.unwrap();
+    let mut reservation = fixture(4, false);
+    let mut data = vec![0; 116];
+    data[..8].copy_from_slice(&Sha256::digest(b"global:reserve_booking")[..8]);
+    let instruction = &mut reservation["transaction"]["message"]["instructions"][0];
+    instruction["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(9));
+    instruction["data"] = bs58::encode(data).into_string().into();
+    save(&app, reservation, "native-reserve", 1).await;
+    let mut claim = fixture(4, true);
+    let mut data = vec![0; 21];
+    data[..8].copy_from_slice(&Sha256::digest(b"global:claim_booking")[..8]);
+    for offset in [8, 12, 16] {
+        data[offset..offset + 4].copy_from_slice(&10u32.to_le_bytes());
+    }
+    let instruction = &mut claim["transaction"]["message"]["instructions"][0];
+    instruction["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!(12), json!(8)]);
+    instruction["data"] = bs58::encode(data).into_string().into();
+    let mut fee = vec![12];
+    fee.extend_from_slice(&100u64.to_le_bytes());
+    fee.push(6);
+    claim["meta"]["innerInstructions"][0]["instructions"].as_array_mut().unwrap().push(json!({"programIdIndex":15,"accounts":[11,13,8,14],"data":bs58::encode(fee).into_string()}));
+    save(&app, claim, "native-claim", 2).await;
+    app.db.call(|conn| { conn.execute_batch("INSERT INTO settings VALUES('history_exhausted','true'); INSERT INTO settings VALUES('receipts_checked_at','1');")?; Ok(()) }).await.unwrap();
+    one_shot::resolve(&app).await.unwrap();
+    let stats = usage::stats(&app, format!("list:{}", key(4)))
+        .await
+        .unwrap();
+    assert_eq!(stats["requests"], 1);
+    assert_eq!(stats["tokens"], 30);
+    assert_eq!(stats["spentAtomic"], "9007199254741093");
+}
