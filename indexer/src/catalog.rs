@@ -124,7 +124,12 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         if offers.is_empty() {
             continue;
         }
-        models.push(json!({"id":model_id,"address":id,"group":if d.len() == 176 && d[144..176] != [0;32] {Some(address(d,144))} else {None},"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
+        let creator = doc.get("creator").and_then(Value::as_str).filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+        });
+        models.push(json!({"id":model_id,"creator":creator,"address":id,"group":if d.len() == 176 && d[144..176] != [0;32] {Some(address(d,144))} else {None},"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
     }
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let pending = index
