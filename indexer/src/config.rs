@@ -54,15 +54,15 @@ impl Config {
             database: get("FOSSA_DATABASE", "state/indexer.sqlite").into(),
             program: key(
                 "FOSSA_PROGRAM_ID",
-                "F8q85nw6UScZCBKBJqVAu7ZdYhmT9XRsm6TqZzJqXSNT",
+                "routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41",
             )?,
             market: key(
                 "FOSSA_MARKET",
-                "8wceBTFDAiC9WiT3xZGRf9Nf4xrz8eBCxExBtDWz1Som",
+                "HwZJcXPHhQFfGYivpVFDrn65EYoksMt7zZLeZWgyYAv",
             )?,
             provider_list: key(
                 "FOSSA_PROVIDER_LIST",
-                "CCgnXjgpVfNcFrZpFUYaepySTSfHxuqxPKej5D94zhc6",
+                "6jgtRvRwspmxJXC2hoqUKRgAHeb2pFMiTD7n5p33hcFB",
             )?,
             mint: key(
                 "FOSSA_USDC_MINT",
