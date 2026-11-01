@@ -51,15 +51,17 @@
         "schemaVersion": { "const": 1, "default": 1 },
         "id": { "$ref": "#/$defs/identifier", "description": "Canonical model identifier; SHA-256 of its exact UTF-8 bytes must equal the on-chain model ID." },
         "name": { "$ref": "#/$defs/name", "description": "Model display name." },
+        "aliasOf": { "$ref": "#/$defs/identifier", "description": "Retired duplicate model identifier redirects to this canonical model identifier. Must differ from id. Aliases never publish routable offers; targets must exist and must not be aliases." },
+        "checkpoints": {"type":"array","minItems":1,"maxItems":256,"items":{"type":"object","required":["id","name"],"properties":{"id":{"$ref":"#/$defs/identifier"},"name":{"$ref":"#/$defs/name"}},"additionalProperties":false},"description":"Immutable checkpoint identities in earliest-to-latest order. SHA-256 of exact UTF-8 id bytes identifies an on-chain offer checkpoint. Names are display labels. IDs must be unique."},
         "modalities": {
           "type": "object", "required": ["input", "output"],
           "properties": { "input": { "$ref": "#/$defs/modalityList" }, "output": { "$ref": "#/$defs/modalityList" } },
           "additionalProperties": true,
-          "description": "Declared input/output modalities. A declaration does not imply support in every client or provider."
+          "description": "Descriptive family modalities. On-chain offer modality masks determine routing eligibility."
         },
-        "contextTokens": { "$ref": "#/$defs/tokenLimit", "description": "Declared context limit in tokens." },
-        "outputTokens": { "$ref": "#/$defs/tokenLimit", "description": "Maximum output tokens per request." },
-        "inputBoundTokens": { "$ref": "#/$defs/tokenLimit", "description": "Maximum conservative input bound; defaults to contextTokens and must not exceed it." },
+        "contextTokens": { "$ref": "#/$defs/tokenLimit", "description": "Descriptive family context limit. Each on-chain offer publishes its own context window." },
+        "outputTokens": { "$ref": "#/$defs/tokenLimit", "description": "Descriptive family output limit. Each on-chain offer publishes its own maximum output." },
+        "inputBoundTokens": { "$ref": "#/$defs/tokenLimit", "description": "Descriptive family conservative input limit; defaults to contextTokens and must not exceed it. On-chain offer limits determine eligibility." },
         "capabilities": {
           "type": "object", "required": ["tools", "reasoning"],
           "properties": { "tools": { "type": "boolean" }, "reasoning": { "type": "boolean" } },
@@ -105,6 +107,7 @@
         "$schema": "https://fossa.ag/schemas/metadata/v1.json#/$defs/model",
         "schemaVersion": 1,
         "id": "example/text-model-v1",
+        "checkpoints": [{ "id": "example/text-model-v1@2026-10-17", "name": "1017" }],
         "name": "Example Text Model",
         "modalities": { "input": ["text"], "output": ["text"] },
         "contextTokens": 131072,

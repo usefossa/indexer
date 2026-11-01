@@ -9,17 +9,20 @@ use std::str::FromStr;
 
 pub const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-pub const BOOKING_LEN: usize = 472;
+pub const BOOKING_LEN: usize = 520;
+pub const TERMS_LEN: usize = 132;
+pub const LEGACY_TERMS_DISCRIMINATOR: [u8; 8] = [223, 24, 40, 223, 249, 219, 14, 97];
+pub const LEGACY_BOOKING_DISCRIMINATOR: [u8; 8] = [147, 50, 61, 138, 208, 21, 254, 156];
 pub const MARKET_DISCRIMINATOR: [u8; 8] = [219, 190, 213, 55, 0, 227, 198, 154];
 pub const MODEL_DISCRIMINATOR: [u8; 8] = [152, 221, 247, 122, 185, 125, 223, 151];
 pub const MODEL_GROUP_DISCRIMINATOR: [u8; 8] = [237, 175, 79, 136, 212, 228, 240, 177];
 pub const PROVIDER_DISCRIMINATOR: [u8; 8] = [164, 180, 71, 17, 75, 216, 80, 195];
 pub const MODELMETADATA_DISCRIMINATOR: [u8; 8] = [243, 161, 2, 132, 123, 88, 51, 61];
 pub const LISTMETADATA_DISCRIMINATOR: [u8; 8] = [245, 77, 238, 20, 114, 17, 94, 226];
-pub const TERMS_DISCRIMINATOR: [u8; 8] = [223, 24, 40, 223, 249, 219, 14, 97];
+pub const TERMS_DISCRIMINATOR: [u8; 8] = [136, 206, 216, 233, 146, 248, 21, 65];
 pub const CAPACITY_DISCRIMINATOR: [u8; 8] = [19, 216, 196, 142, 39, 29, 145, 16];
 pub const USER_DISCRIMINATOR: [u8; 8] = [159, 117, 95, 227, 239, 151, 58, 236];
-pub const BOOKING_DISCRIMINATOR: [u8; 8] = [147, 50, 61, 138, 208, 21, 254, 156];
+pub const BOOKING_DISCRIMINATOR: [u8; 8] = [151, 160, 101, 76, 250, 167, 210, 104];
 pub const LIST_DISCRIMINATOR: [u8; 8] = [169, 24, 186, 110, 22, 139, 190, 82];
 pub const RESERVE_BOOKING_DISCRIMINATOR: [u8; 8] = [170, 28, 99, 26, 95, 11, 225, 109];
 pub const CLAIM_BOOKING_DISCRIMINATOR: [u8; 8] = [143, 218, 32, 94, 7, 208, 186, 252];
@@ -130,15 +133,27 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
         d if d == MODELMETADATA_DISCRIMINATOR && data.len() == 396 => Kind::Metadata,
         d if d == LISTMETADATA_DISCRIMINATOR && data.len() == 396 => Kind::ListMetadata,
         d if d == USER_DISCRIMINATOR && data.len() == 128 => Kind::User,
-        d if d == BOOKING_DISCRIMINATOR && data.len() == BOOKING_LEN && data[148] <= 5 => {
+        d if (d == BOOKING_DISCRIMINATOR && data.len() == BOOKING_LEN
+            || d == LEGACY_BOOKING_DISCRIMINATOR && data.len() == 472)
+            && data[148] <= 5 =>
+        {
             Kind::Booking
         }
-        d if (d == TERMS_DISCRIMINATOR || d == CAPACITY_DISCRIMINATOR) && data.len() >= 48 => {
-            let terms = d == TERMS_DISCRIMINATOR;
+        d if (d == TERMS_DISCRIMINATOR
+            || d == LEGACY_TERMS_DISCRIMINATOR
+            || d == CAPACITY_DISCRIMINATOR)
+            && data.len() >= 48 =>
+        {
+            let terms = d != CAPACITY_DISCRIMINATOR;
+            let stride = if d == TERMS_DISCRIMINATOR {
+                TERMS_LEN
+            } else {
+                120
+            };
             let limit = u32_at(data, 40) as usize;
             if !(1..=4096).contains(&limit)
                 || u32_at(data, 44) as usize > limit
-                || data.len() != 48 + limit * if terms { 120 } else { 32 }
+                || data.len() != 48 + limit * if terms { stride } else { 32 }
             {
                 return None;
             }
@@ -307,7 +322,9 @@ pub fn model_group(data: &[u8], address: &str) -> Value {
         "routeToReserve": data[136] == 1})
 }
 pub fn booking_fees(data: &[u8]) -> Option<Value> {
-    (data.starts_with(&BOOKING_DISCRIMINATOR) && kind(data) == Some(Kind::Booking)).then(|| {
+    ((data.starts_with(&BOOKING_DISCRIMINATOR) || data.starts_with(&LEGACY_BOOKING_DISCRIMINATOR))
+        && kind(data) == Some(Kind::Booking))
+    .then(|| {
         serde_json::json!({"creator": optional_address(data, 368),
             "protocolDestination": optional_address(data, 400),
             "reserveAuthority": optional_address(data, 432), "feeBps": u16_at(data, 464),

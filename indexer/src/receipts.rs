@@ -116,9 +116,11 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
             let native = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
             let generation = if native && accounts.len() == 10 {
-                match (data.len(), data.get(115)) {
-                    (116, Some(0)) => 0,
-                    (124, Some(1)) if u64_at(&data, 116) > 0 => u64_at(&data, 116),
+                match (data.len(), data.get(154)) {
+                    (155, Some(0)) => 0,
+                    (163, Some(1)) if u64_at(&data, 155) > 0 => u64_at(&data, 155),
+                    (116, _) if data[115] == 0 => 0,
+                    (124, _) if data[115] == 1 && u64_at(&data, 116) > 0 => u64_at(&data, 116),
                     _ => return None,
                 }
             } else if accounts.len() == 9

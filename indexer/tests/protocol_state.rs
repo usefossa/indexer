@@ -394,7 +394,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     );
     let provider_doc =
         json!({"name":"Example","endpoint":"https://example.com/v1/chat/completions"});
-    let model_doc = json!({"id":"example/model","name":"Example Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
+    let model_doc = json!({"id":"example/model","name":"Example Model","checkpoints":[{"id":"example/model@1017","name":"1017"}],"modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
     let id_hash = Sha256::digest(b"example/model");
     let (model, model_bump) = Pubkey::find_program_address(
         &[b"model", config.market.as_ref(), &id_hash],
@@ -478,22 +478,31 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     );
     assert!(protocol::validate(&wallet.to_string(), &data, &config).is_none());
     rows.push((model.to_string(), data));
-    for (address, len, magic) in [(terms, 288, b"TERMSV20"), (capacity, 112, b"CAPACV20")] {
+    for (address, len, magic) in [
+        (terms, 312, &protocol::TERMS_DISCRIMINATOR),
+        (capacity, 112, b"CAPACV20"),
+    ] {
         let mut data = vec![0; len];
         data[..8].copy_from_slice(magic);
         data[8..40].copy_from_slice(model.as_ref());
         data[40..44].copy_from_slice(&2u32.to_le_bytes());
         data[44..48].copy_from_slice(&2u32.to_le_bytes());
-        if len == 288 {
+        if len == 312 {
             data[48..80].copy_from_slice(wallet.as_ref());
             data[144..148].copy_from_slice(&100u32.to_le_bytes());
             data[152..156].copy_from_slice(&200u32.to_le_bytes());
             data[156..158].copy_from_slice(&50u16.to_le_bytes());
             data[159] = 1;
-            data[160] = 255;
+            data[112..144].copy_from_slice(&Sha256::digest(b"example/model@1017"));
+            data[160] = 1;
+            data[161] = 1;
+            data[162] = 1;
+            for (at, value) in [(168, 1000u32), (172, 900), (176, 100)] {
+                data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
             data[164..168].copy_from_slice(&5u32.to_le_bytes());
-            data.copy_within(48..168, 168);
-            data[168..200].fill(9);
+            data.copy_within(48..180, 180);
+            data[180..212].fill(9);
         } else {
             data[48..56].copy_from_slice(&9_007_199_254_740_993u64.to_le_bytes());
         }
@@ -524,6 +533,13 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
         config.provider_list.to_string()
     );
     assert_eq!(catalog.value["models"][0]["offerCount"], 2);
+    let offer = &catalog.value["models"][0]["offers"][0];
+    assert_eq!(offer["checkpointName"], "1017");
+    assert_eq!(offer["checkpointId"], "example/model@1017");
+    assert_eq!(offer["contextTokens"], 1000);
+    assert_eq!(offer["inputBoundTokens"], 900);
+    assert_eq!(offer["outputTokens"], 100);
+    assert_eq!(offer["modalities"]["input"], json!(["text"]));
     assert_eq!(
         catalog.value["models"][0]["offers"]
             .as_array()
@@ -536,6 +552,91 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     }
     assert!(catalog.value["providers"][0].get("approved").is_none());
     assert_eq!(catalog.value["models"][0]["offers"][0]["available"], true);
+    {
+        let mut state = app.index.state.write().await;
+        let original_terms = state.accounts[&terms.to_string()].clone();
+        let mut unknown = original_terms.clone();
+        let mut bytes = unknown.data.to_vec();
+        bytes[112..144].fill(99);
+        unknown.data = bytes.into();
+        state.accounts.insert(terms.to_string(), unknown);
+        assert!(
+            fossa_indexer::catalog::build(&state, &config).value["models"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        state.accounts.insert(terms.to_string(), original_terms);
+        let model_template = state.accounts[&model.to_string()].clone();
+        let metadata_template = state.accounts[&meta.to_string()].clone();
+        let original_document = state
+            .documents
+            .values()
+            .find(|document| document.value["id"] == "example/model")
+            .unwrap()
+            .value
+            .clone();
+        let mut inserted = Vec::new();
+        for (alias_id, target) in [
+            ("example/alias", "example/model"),
+            ("example/missing", "example/not-published"),
+            ("example/chained", "example/alias"),
+        ] {
+            let digest = Sha256::digest(alias_id.as_bytes());
+            let (alias_model, bump) = Pubkey::find_program_address(
+                &[b"model", config.market.as_ref(), &digest],
+                &config.program,
+            );
+            let (alias_metadata, metadata_bump) = Pubkey::find_program_address(
+                &[b"model_metadata", alias_model.as_ref()],
+                &config.program,
+            );
+            let mut doc = original_document.clone();
+            doc["id"] = alias_id.into();
+            doc["aliasOf"] = target.into();
+            let raw = serde_json::to_vec(&doc).unwrap();
+            let hash = Sha256::digest(&raw);
+            let mut model_record = model_template.clone();
+            let mut model_bytes = model_record.data.to_vec();
+            model_bytes[40..72].copy_from_slice(&digest);
+            model_bytes[140] = bump;
+            model_record.data = model_bytes.into();
+            let mut metadata_record = metadata_template.clone();
+            let mut metadata_bytes = metadata_record.data.to_vec();
+            metadata_bytes[40..72].copy_from_slice(alias_model.as_ref());
+            metadata_bytes[104..136].copy_from_slice(&hash);
+            metadata_bytes[138] = metadata_bump;
+            metadata_record.data = metadata_bytes.into();
+            state.accounts.insert(alias_model.to_string(), model_record);
+            state
+                .accounts
+                .insert(alias_metadata.to_string(), metadata_record);
+            let document_key = format!("model:{}", hex::encode(hash));
+            state.documents.insert(
+                document_key.clone(),
+                Document {
+                    raw: raw.into(),
+                    value: doc,
+                },
+            );
+            inserted.push((
+                alias_model.to_string(),
+                alias_metadata.to_string(),
+                document_key,
+            ));
+        }
+        let aliases = fossa_indexer::catalog::build(&state, &config);
+        assert_eq!(aliases.value["models"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            aliases.value["aliases"],
+            json!({"example/alias":"example/model"})
+        );
+        for (model, metadata, document) in inserted {
+            state.accounts.remove(&model);
+            state.accounts.remove(&metadata);
+            state.documents.remove(&document);
+        }
+    }
     let unchanged = app
         .index
         .state
@@ -777,6 +878,11 @@ fn native_accounts_preserve_bindings_and_validate_list_fees_without_legacy_cache
     let mut native_booking = booking(&config, 5);
     native_booking.resize(472, 0);
     native_booking[..8].copy_from_slice(&Sha256::digest(b"account:Booking")[..8]);
+    assert_eq!(protocol::kind(&native_booking), Some(Kind::Booking));
+    native_booking.pop();
+    assert_eq!(protocol::kind(&native_booking), None);
+    native_booking.resize(protocol::BOOKING_LEN, 0);
+    native_booking[..8].copy_from_slice(&protocol::BOOKING_DISCRIMINATOR);
     assert_eq!(protocol::kind(&native_booking), Some(Kind::Booking));
     native_booking.pop();
     assert_eq!(protocol::kind(&native_booking), None);

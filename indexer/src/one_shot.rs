@@ -67,6 +67,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, mint: &str) -> Result<Vec
         let native_reserve = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
         let native_claim = data.starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR);
         let charge = match (data.first(), data.len(), accounts.len()) {
+            (_, 155, 10) if native_reserve && data[154] == 0 => None,
             (_, 116, 10) if native_reserve && data[115] == 0 => None,
             (_, 21, 11 | 13) if native_claim && data[20] == 0 => Some(
                 transfer_charge(tx, index, &keys, &accounts[6], None, mint).ok_or(

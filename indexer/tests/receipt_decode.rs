@@ -196,23 +196,25 @@ fn native_booking_attribution_reads_full_u64_after_option_tag() {
     use fossa_indexer::receipts::decode_bookings;
     use sha2::{Digest, Sha256};
     let (mut tx, program, market) = fixture();
-    let mut data = vec![0; 124];
-    data[..8].copy_from_slice(&Sha256::digest(b"global:reserve_booking")[..8]);
-    data[115] = 1;
-    data[116..124].copy_from_slice(&u64::MAX.to_le_bytes());
-    let instruction = &mut tx["transaction"]["message"]["instructions"][0];
-    instruction["accounts"] = json!([0, 1, 2, 3, 4, 5, 7, 8, 9, 6]);
-    instruction["data"] = bs58::encode(&data).into_string().into();
-    assert_eq!(
-        decode_bookings(&tx, &program, &market)[0].generation,
-        u64::MAX.to_string()
-    );
-    data[116..124].fill(0);
-    tx["transaction"]["message"]["instructions"][0]["data"] =
-        bs58::encode(&data).into_string().into();
-    assert!(decode_bookings(&tx, &program, &market).is_empty());
-    data[115] = 0;
-    tx["transaction"]["message"]["instructions"][0]["data"] =
-        bs58::encode(data).into_string().into();
-    assert!(decode_bookings(&tx, &program, &market).is_empty());
+    for (length, tag, generation) in [(124, 115, 116), (163, 154, 155)] {
+        let mut data = vec![0; length];
+        data[..8].copy_from_slice(&Sha256::digest(b"global:reserve_booking")[..8]);
+        data[tag] = 1;
+        data[generation..generation + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        let instruction = &mut tx["transaction"]["message"]["instructions"][0];
+        instruction["accounts"] = json!([0, 1, 2, 3, 4, 5, 7, 8, 9, 6]);
+        instruction["data"] = bs58::encode(&data).into_string().into();
+        assert_eq!(
+            decode_bookings(&tx, &program, &market)[0].generation,
+            u64::MAX.to_string()
+        );
+        data[generation..generation + 8].fill(0);
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(&data).into_string().into();
+        assert!(decode_bookings(&tx, &program, &market).is_empty());
+        data[tag] = 0;
+        tx["transaction"]["message"]["instructions"][0]["data"] =
+            bs58::encode(data).into_string().into();
+        assert!(decode_bookings(&tx, &program, &market).is_empty());
+    }
 }

@@ -98,5 +98,13 @@
   {"kind":"list","name":"list icon wrong type","valid":false,"document":{"name":"Example List","accentColor":"#8B7ACF","icon":{}}},
   {"kind":"list","name":"list missing accent","valid":false,"document":{"name":"Example List"}},
   {"kind":"list","name":"list missing name","valid":false,"document":{"accentColor":"#123456"}},
-  {"kind":"list","name":"list accent trailing newline","valid":false,"document":{"name":"Example List","accentColor":"#ffffff\n"}}
+  {"kind":"list","name":"list accent trailing newline","valid":false,"document":{"name":"Example List","accentColor":"#ffffff\n"}},
+  {"kind":"model","name":"ordered immutable checkpoints","valid":true,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[{"id":"example/model@2026-09-05","name":"0905"},{"id":"example/model@2026-10-17","name":"1017"}]}},
+  {"kind":"model","name":"duplicate checkpoint identity","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[{"id":"example/model@1017","name":"1017"},{"id":"example/model@1017","name":"Latest"}]}},
+  {"kind":"model","name":"checkpoint requires name","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[{"id":"example/model@1017"}]}},
+  {"kind":"model","name":"checkpoint identity cannot contain whitespace","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[{"id":"example/model @1017","name":"1017"}]}},
+  {"kind":"model","name":"empty checkpoints","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"checkpoints":[]}},
+  {"kind":"model","name":"retired duplicate alias","valid":true,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"aliasOf":"example/canonical"}},
+  {"kind":"model","name":"self alias is invalid","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"aliasOf":"example/model"}},
+  {"kind":"model","name":"alias identifier cannot contain whitespace","valid":false,"document":{"id":"example/model","name":"Model","modalities":{"input":["text"],"output":["text"]},"contextTokens":128,"outputTokens":64,"aliasOf":"example/model bad"}}
 ]

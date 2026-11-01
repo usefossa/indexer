@@ -74,6 +74,12 @@ pub fn validate(kind: Kind, value: &Value) -> Result<(), String> {
     }
     if matches!(kind, Kind::Model) {
         if value
+            .get("aliasOf")
+            .is_some_and(|target| target == &value["id"])
+        {
+            return Err("Invalid model metadata: aliasOf must differ from id".into());
+        }
+        if value
             .get("inputBoundTokens")
             .is_some_and(|bound| number(bound) > number(&value["contextTokens"]))
         {
@@ -84,6 +90,17 @@ pub fn validate(kind: Kind, value: &Value) -> Result<(), String> {
             .is_some_and(|settings| number(&settings["maxTokens"]) > number(&value["outputTokens"]))
         {
             return Err("Invalid model metadata: settings.maxTokens exceeds outputTokens".into());
+        }
+        let mut checkpoint_ids = HashSet::new();
+        for checkpoint in value
+            .get("checkpoints")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !checkpoint_ids.insert(checkpoint["id"].as_str().unwrap()) {
+                return Err("Invalid model metadata: duplicate checkpoint id".into());
+            }
         }
         let mut ids = HashSet::new();
         for variant in value
