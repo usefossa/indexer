@@ -394,7 +394,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     );
     let provider_doc =
         json!({"name":"Example","endpoint":"https://example.com/v1/chat/completions"});
-    let model_doc = json!({"id":"example/model","name":"Example Model","checkpoints":[{"id":"example/model@1017","name":"1017"}],"modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
+    let model_doc = json!({"id":"example/model","name":"Example Model","checkpoints":[{"id":"example/model@1017","name":"1017"},{"id":"example/model@unspecified","name":"Unspecified","ordered":false}],"modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
     let id_hash = Sha256::digest(b"example/model");
     let (model, model_bump) = Pubkey::find_program_address(
         &[b"model", config.market.as_ref(), &id_hash],
@@ -555,6 +555,17 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     {
         let mut state = app.index.state.write().await;
         let original_terms = state.accounts[&terms.to_string()].clone();
+        let mut unversioned = original_terms.clone();
+        let mut bytes = unversioned.data.to_vec();
+        bytes[112..144].copy_from_slice(&Sha256::digest(b"example/model@unspecified"));
+        unversioned.data = bytes.into();
+        state.accounts.insert(terms.to_string(), unversioned);
+        let unversioned_catalog = fossa_indexer::catalog::build(&state, &config);
+        assert_eq!(
+            unversioned_catalog.value["models"][0]["offers"][0]["checkpointName"],
+            "Unspecified"
+        );
+        assert!(unversioned_catalog.value["models"][0]["offers"][0]["checkpointOrder"].is_null());
         let mut unknown = original_terms.clone();
         let mut bytes = unknown.data.to_vec();
         bytes[112..144].fill(99);

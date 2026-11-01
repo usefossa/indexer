@@ -117,9 +117,19 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             .flatten()
             .enumerate()
             .filter_map(|(order, revision)| {
-                revision["id"]
-                    .as_str()
-                    .map(|id| (Sha256::digest(id.as_bytes()).into(), (order, revision)))
+                revision["id"].as_str().map(|id| {
+                    (
+                        Sha256::digest(id.as_bytes()).into(),
+                        (
+                            revision
+                                .get("ordered")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(true)
+                                .then_some(order),
+                            revision,
+                        ),
+                    )
+                })
             })
             .collect();
         let mut offers = Vec::new();
