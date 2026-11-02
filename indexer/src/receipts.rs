@@ -104,7 +104,7 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
             }
             let accounts = ix["accounts"]
                 .as_array()
-                .filter(|a| [9, 10].contains(&a.len()))?;
+                .filter(|a| [9, 10, 12].contains(&a.len()))?;
             let key = |i: usize| {
                 keys.get(usize::try_from(accounts.get(i)?.as_u64()?).ok()?)
                     .filter(|k| k.len() == 32)
@@ -114,8 +114,26 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
                 return None;
             }
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
+            let scoped = data.starts_with(&crate::protocol::RESERVE_LIST_BOOKING_DISCRIMINATOR);
             let native = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
-            let generation = if native && accounts.len() == 10 {
+            let generation = if scoped && accounts.len() == 12 {
+                if data.len() < 156 || data[153] > 1 || u32_at(&data, 149) > 0 && data[153] == 0 {
+                    return None;
+                }
+                let (generation, at) = match data[154] {
+                    0 => (0, 155),
+                    1 if data.len() >= 164 => (u64_at(&data, 155), 163),
+                    _ => return None,
+                };
+                if data[154] == 1 && generation == 0 {
+                    return None;
+                }
+                match (data.len() - at, data[at]) {
+                    (1, 0) => generation,
+                    (5, 1) if u32_at(&data, at + 1) > 0 => generation,
+                    _ => return None,
+                }
+            } else if native && accounts.len() == 10 {
                 match (data.len(), data.get(154)) {
                     (155, Some(0)) => 0,
                     (163, Some(1)) if u64_at(&data, 155) > 0 => u64_at(&data, 155),
@@ -170,7 +188,7 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let accounts = ix["accounts"].as_array()?;
-            if ![11, 12, 13].contains(&accounts.len()) {
+            if ![11, 12, 13, 14].contains(&accounts.len()) {
                 return None;
             }
             let key = |i: usize| {
@@ -181,12 +199,16 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 return None;
             }
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
-            let native = data.starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR);
+            let scoped = data.starts_with(&crate::protocol::CLAIM_LIST_BOOKING_DISCRIMINATOR);
+            let native = scoped || data.starts_with(&crate::protocol::CLAIM_BOOKING_DISCRIMINATOR);
             let version = if native
                 && data.len() == 141
                 && data[20] == 1
-                && [11, 13].contains(&accounts.len())
-            {
+                && if scoped {
+                    [12, 14].contains(&accounts.len())
+                } else {
+                    [11, 12, 13, 14].contains(&accounts.len())
+                } {
                 2
             } else {
                 match (data.len(), accounts.len(), data.first()) {
@@ -196,6 +218,29 @@ pub fn decode(tx: &Value, program: &str, market: &str, signature: &str) -> Vec<R
                 }
             };
             let r = &data[if version == 2 { 21 } else { 37 }..];
+            if native && [12, 14].contains(&accounts.len()) {
+                let program_key = crate::protocol::pubkey(program).ok()?;
+                let market_key = crate::protocol::pubkey(market).ok()?;
+                let expected = solana_pubkey::Pubkey::find_program_address(
+                    &[b"wallet_bookings", market_key.as_ref(), &r[..32]],
+                    &program_key,
+                )
+                .0;
+                let scoped_wallet = solana_pubkey::Pubkey::find_program_address(
+                    &[b"provider_wallet", market_key.as_ref(), &r[..32]],
+                    &program_key,
+                )
+                .0;
+                if scoped && key(11)? != expected.as_ref() && key(11)? != scoped_wallet.as_ref() {
+                    return None;
+                }
+                if key(11)? != program_key.as_ref()
+                    && key(11)? != expected.as_ref()
+                    && key(11)? != scoped_wallet.as_ref()
+                {
+                    return None;
+                }
+            }
             let index = if version == 2 {
                 u64_at(r, 96)
             } else {

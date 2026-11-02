@@ -55,6 +55,8 @@ pub struct Directory {
 }
 impl Directory {
     pub fn build(index: &IndexState) -> Self {
+        let booking_limits =
+            protocol::booking_limits(index.accounts.values().map(|record| record.data.as_ref()));
         let (mut providers, mut models, mut metadata) =
             (HashMap::new(), HashMap::new(), HashMap::new());
         for (id, record) in &index.accounts {
@@ -65,7 +67,7 @@ impl Directory {
             match protocol::kind(d) {
                 Some(Kind::Provider) => {
                     let wallet = address(d, 40);
-                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"website":doc.value.get("website")}));
+                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":booking_limits.get(&wallet),"website":doc.value.get("website")}));
                 }
                 Some(Kind::Metadata) => {
                     let model = address(d, 40);

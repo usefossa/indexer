@@ -151,6 +151,15 @@ pub fn parse(kind: Kind, bytes: &[u8]) -> Result<Value, String> {
             *value = number(value).into();
         }
     }
+    if matches!(kind, Kind::Provider)
+        && let Some(limits) = value
+            .get_mut("requestLimits")
+            .and_then(Value::as_object_mut)
+    {
+        for value in limits.values_mut() {
+            *value = number(value).into();
+        }
+    }
     Ok(value)
 }
 

@@ -90,6 +90,11 @@ fn catalog_account(record: &Record) -> bool {
                 | Kind::Capacity
                 | Kind::ProviderList
                 | Kind::ListMetadata
+                | Kind::BookingPolicies
+                | Kind::ProviderPolicy
+                | Kind::ListRouting
+                | Kind::ListTerms
+                | Kind::ListCapacity
         )
     )
 }
@@ -97,7 +102,13 @@ fn directory_account(record: &Record) -> bool {
     matches!(
         protocol::kind(&record.data),
         Some(
-            Kind::Model | Kind::Provider | Kind::Metadata | Kind::ProviderList | Kind::ListMetadata
+            Kind::Model
+                | Kind::Provider
+                | Kind::Metadata
+                | Kind::ProviderList
+                | Kind::ListMetadata
+                | Kind::BookingPolicies
+                | Kind::ProviderPolicy
         )
     )
 }

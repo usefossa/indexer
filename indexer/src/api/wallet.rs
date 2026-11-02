@@ -73,14 +73,39 @@ async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Va
     let lane = protocol::pubkey(&session.lane)?;
     let source = protocol::associated(&owner, &app.config.mint);
     let vault = protocol::vault(&lane, &app.config);
-    let result=app.rpc.call("getMultipleAccounts",json!([[session.wallet,source.to_string(),session.lane],{"encoding":"base64","commitment":app.config.commitment,"minContextSlot":minimum}])).await?;
+    let provider_wallet = Pubkey::find_program_address(
+        &[
+            b"provider_wallet",
+            app.config.market.as_ref(),
+            owner.as_ref(),
+        ],
+        &app.config.program,
+    )
+    .0;
+    let scoped = app
+        .index
+        .state
+        .read()
+        .await
+        .accounts
+        .get(&app.config.market.to_string())
+        .is_some_and(|record| record.data.get(177) == Some(&1));
+    let mut addresses = vec![
+        session.wallet.clone(),
+        source.to_string(),
+        session.lane.clone(),
+    ];
+    if scoped {
+        addresses.push(provider_wallet.to_string());
+    }
+    let result=app.rpc.call("getMultipleAccounts",json!([addresses,{"encoding":"base64","commitment":app.config.commitment,"minContextSlot":minimum}])).await?;
     let slot = result["context"]["slot"]
         .as_u64()
         .filter(|s| *s >= minimum)
         .ok_or(Error::unavailable("Wallet snapshot regressed"))?;
     let values = result["value"]
         .as_array()
-        .filter(|v| v.len() == 3)
+        .filter(|v| v.len() == if scoped { 4 } else { 3 })
         .ok_or(Error::unavailable("Incomplete wallet snapshot"))?;
     let mut free = 0;
     let mut generation = 0;
@@ -130,9 +155,24 @@ async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Va
             .as_u64()
             .ok_or(Error::unavailable("Invalid wallet balance"))?
     };
+    let provider_wallet_snapshot = if scoped && !values[3].is_null() {
+        let data = protocol::bytes(&values[3])
+            .ok_or(Error::unavailable("Invalid provider wallet encoding"))?;
+        if values[3]["owner"] != app.config.program.to_string()
+            || protocol::validate(&provider_wallet.to_string(), &data, &app.config)
+                != Some(Kind::ProviderWallet)
+        {
+            return Err(Error::unavailable("Invalid provider wallet ledger"));
+        }
+        Some(
+            json!({"address":provider_wallet.to_string(),"owner":values[3]["owner"],"data":values[3]["data"][0],"slot":slot,"snapshotSlot":slot,"version":0}),
+        )
+    } else {
+        None
+    };
     let bookings = booking_pool(app, session).await;
     Ok(
-        json!({"wallet":session.wallet,"lane":session.lane,"vault":vault.to_string(),"source":source.to_string(),"ready":initialized,"lamports":lamports.to_string(),"usdcAtomic":usdc.to_string(),"freeAtomic":free.to_string(),"generation":generation.to_string(),"bookings":bookings,"slot":slot,"slots":[slot,slot,slot]}),
+        json!({"wallet":session.wallet,"lane":session.lane,"vault":vault.to_string(),"source":source.to_string(),"ready":initialized,"lamports":lamports.to_string(),"usdcAtomic":usdc.to_string(),"freeAtomic":free.to_string(),"generation":generation.to_string(),"bookings":bookings,"providerWallet":provider_wallet_snapshot,"slot":slot,"slots":[slot,slot,slot]}),
     )
 }
 pub async fn booking_pool(app: &App, session: &Session) -> Vec<Value> {
@@ -256,8 +296,10 @@ pub async fn provider(State(app): State<App>, Path(wallet): Path<String>) -> Res
                 StatusCode::NOT_FOUND,
                 "Provider metadata unavailable",
             ))?;
+        let booking_limits =
+            protocol::booking_limits(state.accounts.values().map(|record| record.data.as_ref()));
         (
-            json!({"wallet":wallet,"address":address,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image")}),
+            json!({"wallet":wallet,"address":address,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":booking_limits.get(&wallet)}),
             state.ready(&app.config),
         )
     };

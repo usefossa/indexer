@@ -11,6 +11,42 @@ use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
 use std::sync::Arc;
 
+#[test]
+fn booking_policies_require_canonical_registry_and_keep_exact_wallet_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let (address, bump) = Pubkey::find_program_address(
+        &[b"booking_policies", config.market.as_ref()],
+        &config.program,
+    );
+    let provider = Pubkey::new_from_array([73; 32]);
+    let mut data = vec![0; 96];
+    data[..8].copy_from_slice(&protocol::BOOKING_POLICIES_DISCRIMINATOR);
+    data[8..40].copy_from_slice(config.market.as_ref());
+    data[40..44].copy_from_slice(&1u32.to_le_bytes());
+    data[44] = bump;
+    data[48..52].copy_from_slice(&1u32.to_le_bytes());
+    data[52..84].copy_from_slice(provider.as_ref());
+    data[84..88].copy_from_slice(&60u32.to_le_bytes());
+    data[88..92].copy_from_slice(&120u32.to_le_bytes());
+    data[92..96].copy_from_slice(&8u32.to_le_bytes());
+    assert_eq!(
+        protocol::validate(&address.to_string(), &data, &config),
+        Some(Kind::BookingPolicies)
+    );
+    assert_eq!(
+        protocol::validate(&provider.to_string(), &data, &config),
+        None
+    );
+    let values = protocol::booking_policy_values(&data);
+    assert_eq!(
+        values[&provider.to_string()],
+        json!({"providerPolicy":0,"walletWindowSeconds":60,"walletBookingsPerWindow":120,"walletBookingCapacity":8})
+    );
+    data[48..52].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(protocol::kind(&data), None);
+}
+
 fn record(
     config: &fossa_indexer::config::Config,
     slot: u64,
@@ -897,4 +933,49 @@ fn native_accounts_preserve_bindings_and_validate_list_fees_without_legacy_cache
     assert_eq!(protocol::kind(&native_booking), Some(Kind::Booking));
     native_booking.pop();
     assert_eq!(protocol::kind(&native_booking), None);
+}
+
+#[test]
+fn scoped_native_fixtures_validate_canonical_addresses_and_bounded_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = common::config(dir.path());
+    config.market = Pubkey::new_from_array([1; 32]);
+    config.program = "routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41"
+        .parse()
+        .unwrap();
+    for line in include_str!("fixtures/scoped-accounts.jsonl").lines() {
+        let fixture: serde_json::Value = serde_json::from_str(line).unwrap();
+        let mut data: Vec<u8> = serde_json::from_value(fixture["data"].clone()).unwrap();
+        let expected = match fixture["layout"].as_str().unwrap() {
+            "ProviderPolicy" => Kind::ProviderPolicy,
+            "ProviderModelCapacity" => Kind::ProviderCapacity,
+            "ListRouting" => Kind::ListRouting,
+            "ListTerms" => Kind::ListTerms,
+            "ListCapacity" => Kind::ListCapacity,
+            "ProviderWallet" => Kind::ProviderWallet,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            protocol::validate(fixture["address"].as_str().unwrap(), &data, &config),
+            Some(expected)
+        );
+        assert_eq!(
+            protocol::validate(&Pubkey::new_unique().to_string(), &data, &config),
+            None
+        );
+        if expected == Kind::ListRouting {
+            assert_eq!(protocol::routing_policy_values(&data).unwrap().len(), 1);
+            data[136] = 0;
+            assert!(protocol::routing_policy_values(&data).unwrap().is_empty());
+            data[80..84].copy_from_slice(&2u32.to_le_bytes());
+            assert!(protocol::kind(&data).is_none());
+        } else if expected == Kind::ProviderPolicy {
+            assert_eq!(
+                protocol::provider_policy_value(&data).unwrap()["walletBookingCapacity"],
+                2
+            );
+        }
+        data.pop();
+        assert!(protocol::kind(&data).is_none());
+    }
 }

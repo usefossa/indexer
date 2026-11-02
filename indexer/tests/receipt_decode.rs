@@ -177,6 +177,40 @@ fn native_receipts_decode_full_generation_with_pinned_fee_accounts_and_borsh_opt
     assert_eq!(receipt.generation, u64::MAX.to_string());
     assert_eq!(receipt.charge, "9007199254740993");
     assert_eq!(receipt.tokens, 60);
+    let mut quota_tx = tx.clone();
+    let program_index =
+        quota_tx["transaction"]["message"]["instructions"][0]["programIdIndex"].clone();
+    quota_tx["transaction"]["message"]["instructions"][0]["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .insert(11, program_index);
+    assert_eq!(decode(&quota_tx, &program, &market, "quota").len(), 1);
+    let scoped = Pubkey::find_program_address(
+        &[
+            b"provider_wallet",
+            market.parse::<Pubkey>().unwrap().as_ref(),
+            &data[21..53],
+        ],
+        &program.parse().unwrap(),
+    )
+    .0;
+    let ledger_index = quota_tx["transaction"]["message"]["accountKeys"]
+        .as_array()
+        .unwrap()
+        .len();
+    quota_tx["transaction"]["message"]["accountKeys"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(scoped.to_string()));
+    quota_tx["transaction"]["message"]["instructions"][0]["accounts"][11] = json!(ledger_index);
+    assert_eq!(decode(&quota_tx, &program, &market, "scoped").len(), 1);
+    let mut scoped_data = data.clone();
+    scoped_data[..8].copy_from_slice(&fossa_indexer::protocol::CLAIM_LIST_BOOKING_DISCRIMINATOR);
+    quota_tx["transaction"]["message"]["instructions"][0]["data"] =
+        json!(bs58::encode(scoped_data).into_string());
+    assert_eq!(decode(&quota_tx, &program, &market, "scoped-new").len(), 1);
+    quota_tx["transaction"]["message"]["instructions"][0]["accounts"][11] = json!(0);
+    assert!(decode(&quota_tx, &program, &market, "quota").is_empty());
     assert_eq!(
         receipt.lane().unwrap(),
         Pubkey::new_from_array([4; 32]).to_string()
@@ -217,4 +251,25 @@ fn native_booking_attribution_reads_full_u64_after_option_tag() {
             bs58::encode(data).into_string().into();
         assert!(decode_bookings(&tx, &program, &market).is_empty());
     }
+    let mut data = vec![0; 163];
+    data[..8].copy_from_slice(&fossa_indexer::protocol::RESERVE_LIST_BOOKING_DISCRIMINATOR);
+    data[154] = 1;
+    data[155..].copy_from_slice(&99u64.to_le_bytes());
+    data.push(0);
+    tx["transaction"]["message"]["instructions"][0]["accounts"] =
+        json!([0, 1, 2, 3, 4, 5, 7, 8, 9, 6, 6, 6]);
+    tx["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(&data).into_string().into();
+    assert_eq!(decode_bookings(&tx, &program, &market)[0].generation, "99");
+    data.pop();
+    data.push(1);
+    data.extend(1000u32.to_le_bytes());
+    tx["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(&data).into_string().into();
+    assert_eq!(decode_bookings(&tx, &program, &market)[0].generation, "99");
+    let end = data.len();
+    data[end - 4..].fill(0);
+    tx["transaction"]["message"]["instructions"][0]["data"] =
+        bs58::encode(&data).into_string().into();
+    assert!(decode_bookings(&tx, &program, &market).is_empty());
 }

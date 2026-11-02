@@ -14,6 +14,21 @@
     "probability": { "type": "number", "minimum": 0, "maximum": 1 },
     "penalty": { "type": "number", "minimum": -2, "maximum": 2 },
     "modalityList": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z-]{0,31}$" } },
+    "requestLimit": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+    "requestLimits": {
+      "type": "object", "required": ["windowSeconds"], "minProperties": 2,
+      "properties": {
+        "windowSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "requestsPerWindow": { "$ref": "#/$defs/requestLimit", "description": "Total admitted requests for this provider per window, across all clients and models." },
+        "concurrentRequests": { "$ref": "#/$defs/requestLimit", "description": "Total active inference requests for this provider, across all clients and models." },
+        "requestsPerIp": { "$ref": "#/$defs/requestLimit" },
+        "requestsPerWallet": { "$ref": "#/$defs/requestLimit" },
+        "concurrentPerIp": { "$ref": "#/$defs/requestLimit" },
+        "concurrentPerWallet": { "$ref": "#/$defs/requestLimit" }
+      },
+      "additionalProperties": false,
+      "description": "Provider-wide runtime admission policy across all models. Fixed windows start with each identity's first admitted request. Counts include admitted inference, including later failures; cancellation does not count. Concurrency lasts until inference stops, including disconnect cleanup. Omitted limits are unspecified. IP and wallet identities are separate soft limits, not unique people. Program offer capacity remains independent. Runtime windows may reset on restart; replicas must share admission state."
+    },
     "provider": {
       "type": "object",
       "required": ["name", "endpoint"],
@@ -22,6 +37,7 @@
         "schemaVersion": { "const": 1, "default": 1 },
         "name": { "$ref": "#/$defs/name", "description": "Provider display name." },
         "endpoint": { "$ref": "#/$defs/httpsUrl", "description": "Full HTTPS URL accepting signed inference requests; no credentials or fragment." },
+        "requestLimits": { "$ref": "#/$defs/requestLimits" },
         "image": { "anyOf": [{ "$ref": "#/$defs/httpsUrl" }, { "type": "null" }], "description": "Optional HTTPS image URL; omission or null means no image." }
       },
       "additionalProperties": true,

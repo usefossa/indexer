@@ -34,12 +34,38 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         .unwrap_or_default();
     let mut providers = BTreeMap::new();
     let mut metadata = BTreeMap::new();
+    let booking_limits =
+        protocol::booking_limits(index.accounts.values().map(|record| record.data.as_ref()));
+    let scoped = index
+        .accounts
+        .get(&config.market.to_string())
+        .is_some_and(|record| record.data.get(177) == Some(&1));
+    let routing_address = solana_pubkey::Pubkey::find_program_address(
+        &[b"list_routing", config.provider_list.as_ref()],
+        &config.program,
+    )
+    .0
+    .to_string();
+    let routing_limits = index
+        .accounts
+        .get(&routing_address)
+        .filter(|_| list.is_some_and(|record| record.data.get(80) == Some(&1)))
+        .filter(|record| protocol::address(&record.data, 40) == config.provider_list.to_string())
+        .and_then(|record| protocol::routing_policy_values(&record.data));
+    let ready = ready && (!scoped || routing_limits.is_some());
     for (id, r) in &index.accounts {
         match protocol::kind(&r.data) {
             Some(Kind::Provider) if members.contains(&r.data[40..72]) => {
                 if let Some(doc) = metadata::key(&r.data).and_then(|k| index.documents.get(&k)) {
                     let wallet = address(&r.data, 40);
-                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image")}));
+                    let limits = if scoped {
+                        routing_limits
+                            .as_ref()
+                            .and_then(|limits| limits.get(&wallet))
+                    } else {
+                        booking_limits.get(&wallet)
+                    };
+                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":limits}));
                 }
             }
             Some(Kind::Metadata) => {
@@ -89,8 +115,14 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             aliases.insert(model_id.to_owned(), target.to_owned());
             continue;
         }
-        let terms_id = address(d, 72);
-        let capacity_id = address(d, 104);
+        let (terms_id, capacity_id) = if scoped {
+            let Ok(model) = id.parse::<solana_pubkey::Pubkey>() else {
+                continue;
+            };
+            protocol::list_books(&config.program, &config.provider_list, &model)
+        } else {
+            (address(d, 72), address(d, 104))
+        };
         let (Some(terms), Some(capacity)) = (
             index.accounts.get(&terms_id),
             index.accounts.get(&capacity_id),
@@ -98,18 +130,37 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             continue;
         };
         let (t, c) = (&terms.data, &capacity.data);
-        let limit = u32_at(d, 136);
-        if !t.starts_with(&protocol::TERMS_DISCRIMINATOR)
-            || protocol::kind(t) != Some(Kind::Terms)
-            || protocol::kind(c) != Some(Kind::Capacity)
-            || address(t, 8) != *id
-            || address(c, 8) != *id
-            || u32_at(t, 40) != limit
-            || u32_at(c, 40) != limit
-            || u32_at(t, 44) != u32_at(c, 44)
-        {
-            continue;
-        }
+        let limit = u32_at(if scoped { t } else { d }, if scoped { 104 } else { 136 });
+        let quota_terms = t.starts_with(&protocol::BOOKING_TERMS_DISCRIMINATOR);
+        let count = if scoped {
+            if protocol::kind(t) != Some(Kind::ListTerms)
+                || protocol::kind(c) != Some(Kind::ListCapacity)
+                || address(t, 8) != *id
+                || address(c, 8) != *id
+                || address(t, 40) != config.provider_list.to_string()
+                || address(c, 40) != config.provider_list.to_string()
+                || address(t, 72) != capacity_id
+                || address(c, 72) != terms_id
+                || u32_at(t, 104) != u32_at(c, 104)
+                || u32_at(t, 116) != u32_at(c, 112)
+            {
+                continue;
+            }
+            u32_at(t, 116)
+        } else {
+            if !quota_terms && !t.starts_with(&protocol::TERMS_DISCRIMINATOR)
+                || protocol::kind(t) != Some(Kind::Terms)
+                || protocol::kind(c) != Some(Kind::Capacity)
+                || address(t, 8) != *id
+                || address(c, 8) != *id
+                || u32_at(t, 40) != limit
+                || u32_at(c, 40) != limit
+                || u32_at(t, 44) != u32_at(c, 44)
+            {
+                continue;
+            }
+            u32_at(t, 44)
+        };
         let checkpoints: BTreeMap<[u8; 32], _> = doc
             .get("checkpoints")
             .and_then(Value::as_array)
@@ -133,8 +184,16 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             })
             .collect();
         let mut offers = Vec::new();
-        for slot in 0..u32_at(t, 44) as usize {
-            let ti = 48 + slot * protocol::TERMS_LEN;
+        for slot in 0..count as usize {
+            let ti = if scoped { 120 } else { 48 }
+                + slot
+                    * if scoped {
+                        140
+                    } else if quota_terms {
+                        136
+                    } else {
+                        protocol::TERMS_LEN
+                    };
             let checkpoint = &t[ti + 64..ti + 96];
             let Some((checkpoint_order, revision)) = checkpoints.get(checkpoint) else {
                 continue;
@@ -157,12 +216,30 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             {
                 continue;
             }
-            let ci = 48 + slot * 32;
+            let ci = if scoped {
+                116 + slot * 36
+            } else {
+                48 + slot * 32
+            };
             let wallet = address(t, ti);
             let Some(provider) = providers.get(&wallet) else {
                 continue;
             };
-            let active = u32_at(c, ci + 16);
+            if scoped
+                && (address(c, ci) != wallet
+                    || routing_limits
+                        .as_ref()
+                        .is_none_or(|limits| !limits.contains_key(&wallet)))
+            {
+                continue;
+            }
+            if quota_terms
+                && provider["bookingLimits"]["providerPolicy"].as_u64()
+                    != Some(u64::from(u32_at(t, ti + 132)))
+            {
+                continue;
+            }
+            let active = u32_at(c, ci + if scoped { 32 } else { 16 });
             let capacity = u32_at(t, ti + 116);
             let available = ready
                 && group_ready
@@ -192,7 +269,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 && value.len() <= 256
                 && !value.chars().any(|c| c.is_whitespace() || c.is_control())
         });
-        models.push(json!({"id":model_id,"creator":creator,"address":id,"group":if d.len() == 176 && d[144..176] != [0;32] {Some(address(d,144))} else {None},"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":u32_at(t,44),"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
+        models.push(json!({"id":model_id,"creator":creator,"address":id,"group":if d.len() == 176 && d[144..176] != [0;32] {Some(address(d,144))} else {None},"name":doc["name"],"terms":terms_id,"capacity":capacity_id,"limit":limit,"offerCount":count,"offers":offers,"modalities":doc["modalities"],"effort":doc.get("effort"),"variants":doc.get("variants"),"settings":doc.get("settings"),"capabilities":doc.get("capabilities").cloned().unwrap_or_else(||json!({"tools":false,"reasoning":doc.get("effort").is_some()})),"contextTokens":doc["contextTokens"],"outputTokens":doc["outputTokens"],"inputBoundTokens":doc.get("inputBoundTokens").unwrap_or(&doc["contextTokens"])}));
     }
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     aliases.retain(|_, target| {
@@ -206,7 +283,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         .filter_map(|r| metadata::key(&r.data))
         .filter(|key| !index.documents.contains_key(key))
         .count();
-    let value = json!({"aliases":aliases,"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"marketConfig":market_config,"modelGroups":groups.into_values().collect::<Vec<_>>(),"providerList":config.provider_list.to_string(),"providerListFeeBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.0),"providerListProtocolShareBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.1),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
+    let value = json!({"aliases":aliases,"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"marketConfig":market_config,"listRoutingEnabled":scoped,"listRouting":solana_pubkey::Pubkey::find_program_address(&[b"list_routing",config.provider_list.as_ref()],&config.program).0.to_string(),"modelGroups":groups.into_values().collect::<Vec<_>>(),"providerList":config.provider_list.to_string(),"providerListFeeBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.0),"providerListProtocolShareBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.1),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
     let body: Bytes = value.to_string().into();
     let message = format!("{{\"type\":\"catalog\",\"data\":{}}}", value).into();
     Catalog {
