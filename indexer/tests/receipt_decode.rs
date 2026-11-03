@@ -261,6 +261,23 @@ fn native_booking_attribution_reads_full_u64_after_option_tag() {
     tx["transaction"]["message"]["instructions"][0]["data"] =
         bs58::encode(&data).into_string().into();
     assert_eq!(decode_bookings(&tx, &program, &market)[0].generation, "99");
+    for extra_pages in [1, 3, 15, 31, 32] {
+        let mut paged = tx.clone();
+        paged["transaction"]["message"]["instructions"][0]["accounts"]
+            .as_array_mut()
+            .unwrap()
+            .extend(std::iter::repeat_n(json!(6), extra_pages));
+        let rows = decode_bookings(&paged, &program, &market);
+        if extra_pages <= 31 {
+            assert_eq!(rows[0].generation, "99");
+            assert_eq!(
+                rows[0].list,
+                decode_bookings(&tx, &program, &market)[0].list
+            );
+        } else {
+            assert!(rows.is_empty());
+        }
+    }
     data.pop();
     data.push(1);
     data.extend(1000u32.to_le_bytes());

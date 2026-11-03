@@ -50,11 +50,23 @@ impl List {
 }
 pub struct Directory {
     pub providers: HashMap<String, Value>,
+    pub provider_limits: std::collections::BTreeMap<String, Value>,
     pub models: HashMap<String, String>,
     pub lists: HashMap<String, List>,
 }
 impl Directory {
-    pub fn build(index: &IndexState) -> Self {
+    pub fn build(index: &IndexState, config: &crate::config::Config) -> Self {
+        let provider_limits = protocol::provider_limit_values(
+            index
+                .accounts
+                .iter()
+                .map(|(key, record)| (key.as_str(), record.data.as_ref())),
+            config,
+        );
+        let shared = index
+            .accounts
+            .get(&config.market.to_string())
+            .is_some_and(|record| record.data.get(177) == Some(&2));
         let booking_limits =
             protocol::booking_limits(index.accounts.values().map(|record| record.data.as_ref()));
         let (mut providers, mut models, mut metadata) =
@@ -67,7 +79,14 @@ impl Directory {
             match protocol::kind(d) {
                 Some(Kind::Provider) => {
                     let wallet = address(d, 40);
-                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":booking_limits.get(&wallet),"website":doc.value.get("website")}));
+                    let mut value = json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":if shared {None}else{booking_limits.get(&wallet)},"website":doc.value.get("website")});
+                    if shared && let Some(limits) = provider_limits.get(&wallet) {
+                        value
+                            .as_object_mut()
+                            .unwrap()
+                            .extend(limits.as_object().unwrap().clone());
+                    }
+                    providers.insert(wallet, value);
                 }
                 Some(Kind::Metadata) => {
                     let model = address(d, 40);
@@ -99,6 +118,7 @@ impl Directory {
         }).collect();
         Self {
             providers,
+            provider_limits,
             models,
             lists,
         }

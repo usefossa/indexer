@@ -95,6 +95,8 @@ fn catalog_account(record: &Record) -> bool {
                 | Kind::ListRouting
                 | Kind::ListTerms
                 | Kind::ListCapacity
+                | Kind::ProviderLimitPage
+                | Kind::ProviderLimitIndex
         )
     )
 }
@@ -102,13 +104,16 @@ fn directory_account(record: &Record) -> bool {
     matches!(
         protocol::kind(&record.data),
         Some(
-            Kind::Model
+            Kind::Market
+                | Kind::Model
                 | Kind::Provider
                 | Kind::Metadata
                 | Kind::ProviderList
                 | Kind::ListMetadata
                 | Kind::BookingPolicies
                 | Kind::ProviderPolicy
+                | Kind::ProviderLimitPage
+                | Kind::ProviderLimitIndex
         )
     )
 }
@@ -249,14 +254,14 @@ impl Index {
         {
             let s = self.state.read().await;
             if let Some(c) = &s.cached
-                && c.ready == s.catalog_ready(config)
+                && c.source_ready == s.catalog_ready(config)
             {
                 return c.clone();
             }
         }
         let mut s = self.state.write().await;
         if let Some(c) = &s.cached
-            && c.ready == s.catalog_ready(config)
+            && c.source_ready == s.catalog_ready(config)
         {
             return c.clone();
         }

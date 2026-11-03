@@ -104,7 +104,7 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
             }
             let accounts = ix["accounts"]
                 .as_array()
-                .filter(|a| [9, 10, 12].contains(&a.len()))?;
+                .filter(|a| [9, 10].contains(&a.len()) || (12..=43).contains(&a.len()))?;
             let key = |i: usize| {
                 keys.get(usize::try_from(accounts.get(i)?.as_u64()?).ok()?)
                     .filter(|k| k.len() == 32)
@@ -116,7 +116,7 @@ pub fn decode_bookings(tx: &Value, program: &str, market: &str) -> Vec<BookingLi
             let data = bs58::decode(ix["data"].as_str()?).into_vec().ok()?;
             let scoped = data.starts_with(&crate::protocol::RESERVE_LIST_BOOKING_DISCRIMINATOR);
             let native = data.starts_with(&crate::protocol::RESERVE_BOOKING_DISCRIMINATOR);
-            let generation = if scoped && accounts.len() == 12 {
+            let generation = if scoped && (12..=43).contains(&accounts.len()) {
                 if data.len() < 156 || data[153] > 1 || u32_at(&data, 149) > 0 && data[153] == 0 {
                     return None;
                 }

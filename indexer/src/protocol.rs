@@ -11,6 +11,7 @@ pub const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 pub const BOOKING_LEN: usize = 520;
 pub const TERMS_LEN: usize = 132;
+pub const MAX_ACCOUNT_BYTES: usize = 10 * 1024 * 1024;
 pub const LEGACY_TERMS_DISCRIMINATOR: [u8; 8] = [223, 24, 40, 223, 249, 219, 14, 97];
 pub const LEGACY_BOOKING_DISCRIMINATOR: [u8; 8] = [147, 50, 61, 138, 208, 21, 254, 156];
 pub const MARKET_DISCRIMINATOR: [u8; 8] = [219, 190, 213, 55, 0, 227, 198, 154];
@@ -29,6 +30,8 @@ pub const LIST_ROUTING_DISCRIMINATOR: [u8; 8] = [144, 176, 101, 27, 253, 191, 15
 pub const LIST_TERMS_DISCRIMINATOR: [u8; 8] = [174, 240, 243, 180, 203, 181, 0, 107];
 pub const LIST_CAPACITY_DISCRIMINATOR: [u8; 8] = [73, 4, 213, 31, 149, 94, 219, 141];
 pub const PROVIDER_WALLET_DISCRIMINATOR: [u8; 8] = [89, 4, 132, 220, 207, 78, 178, 52];
+pub const PROVIDER_LIMIT_PAGE_DISCRIMINATOR: [u8; 8] = [18, 101, 138, 157, 3, 31, 233, 252];
+pub const PROVIDER_LIMIT_INDEX_DISCRIMINATOR: [u8; 8] = [94, 216, 132, 219, 87, 112, 166, 89];
 pub const CAPACITY_DISCRIMINATOR: [u8; 8] = [19, 216, 196, 142, 39, 29, 145, 16];
 pub const USER_DISCRIMINATOR: [u8; 8] = [159, 117, 95, 227, 239, 151, 58, 236];
 pub const BOOKING_DISCRIMINATOR: [u8; 8] = [151, 160, 101, 76, 250, 167, 210, 104];
@@ -58,6 +61,8 @@ pub enum Kind {
     ListTerms,
     ListCapacity,
     ProviderWallet,
+    ProviderLimitPage,
+    ProviderLimitIndex,
 }
 pub fn key(data: &[u8], offset: usize) -> Option<Pubkey> {
     Some(Pubkey::new_from_array(
@@ -143,7 +148,7 @@ pub fn list_fees(data: &[u8]) -> Option<(u16, u16)> {
 }
 pub fn kind(data: &[u8]) -> Option<Kind> {
     Some(match data.get(..8)? {
-        d if d == MARKET_DISCRIMINATOR && data.len() == 248 && data[176] <= 1 && data[177] <= 1 => {
+        d if d == MARKET_DISCRIMINATOR && data.len() == 248 && data[176] <= 1 && data[177] <= 2 => {
             Kind::Market
         }
         d if d == MODEL_DISCRIMINATOR && data.len() == 176 => Kind::Model,
@@ -195,7 +200,11 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
         }
         d if d == LIST_TERMS_DISCRIMINATOR
             && sorted_slab(data, 120, 140, Some(104))
-            && data[113..116] == [0; 3] =>
+            && data[113] <= 1
+            && data[114..116] == [0; 2]
+            && data[120..120 + u32_at(data, 116) as usize * 140]
+                .chunks_exact(140)
+                .all(|row| (1..=2).contains(&row[114]) && (data[113] == 0 || row[114] == 2)) =>
         {
             Kind::ListTerms
         }
@@ -211,12 +220,36 @@ pub fn kind(data: &[u8]) -> Option<Kind> {
         {
             Kind::ProviderWallet
         }
+        d if d == PROVIDER_LIMIT_PAGE_DISCRIMINATOR
+            && (48..=MAX_ACCOUNT_BYTES).contains(&data.len())
+            && (data.len() - 48).is_multiple_of(40)
+            && u32_at(data, 44) as usize <= (data.len() - 48) / 40
+            && data[41] < 32
+            && data[42..44] == [0; 2]
+            && data[48..48 + u32_at(data, 44) as usize * 40]
+                .chunks_exact(40)
+                .all(|row| {
+                    u32_at(row, 0) != 0
+                        && (1..=86_400).contains(&u32_at(row, 8))
+                        && (1..=86_400).contains(&u32_at(row, 36))
+                }) =>
+        {
+            Kind::ProviderLimitPage
+        }
+        d if d == PROVIDER_LIMIT_INDEX_DISCRIMINATOR
+            && data.len() == 80
+            && data[40..72] != [0; 32]
+            && data[77..80] == [0; 3] =>
+        {
+            Kind::ProviderLimitIndex
+        }
         d if d == MODELMETADATA_DISCRIMINATOR && data.len() == 396 => Kind::Metadata,
         d if d == LISTMETADATA_DISCRIMINATOR && data.len() == 396 => Kind::ListMetadata,
         d if d == USER_DISCRIMINATOR && data.len() == 128 => Kind::User,
         d if (d == BOOKING_DISCRIMINATOR && data.len() == BOOKING_LEN
             || d == LEGACY_BOOKING_DISCRIMINATOR && data.len() == 472)
-            && data[148] <= 5 =>
+            && data[148] <= 5
+            && data[356] <= if d == BOOKING_DISCRIMINATOR { 3 } else { 2 } =>
         {
             Kind::Booking
         }
@@ -414,6 +447,28 @@ pub fn validate(address: &str, data: &[u8], config: &Config) -> Option<Kind> {
                     &config.program,
                 )
         }
+        Kind::ProviderLimitPage => {
+            key(data, 8)? == config.market
+                && pda(
+                    &address,
+                    &[
+                        b"provider_limit_page",
+                        config.market.as_ref(),
+                        &data[41..42],
+                    ],
+                    data[40],
+                    &config.program,
+                )
+        }
+        Kind::ProviderLimitIndex => {
+            key(data, 8)? == config.market
+                && pda(
+                    &address,
+                    &[b"provider_limits", config.market.as_ref(), &data[40..72]],
+                    data[76],
+                    &config.program,
+                )
+        }
         Kind::Metadata => {
             key(data, 8)? == config.market
                 && pda(
@@ -456,14 +511,15 @@ pub fn market_config(data: &[u8]) -> Option<Value> {
             "creationTokenProgram": optional_address(data, 136),
             "creationNetPrice": u64_at(data, 168).to_string(),
             "creationEnabled": data[176] == 1,
-            "listRoutingEnabled": data[177] == 1,
+            "listRoutingEnabled": data[177] >= 1,
+            "providerLimitsEnabled": data[177] == 2,
             "dexProgram": optional_address(data, 184), "dexConfig": optional_address(data, 216)
         })
     })
 }
 fn sorted_slab(data: &[u8], offset: usize, stride: usize, limit_at: Option<usize>) -> bool {
     if data.len() < offset
-        || data.len() > 10 * 1024 * 1024
+        || data.len() > MAX_ACCOUNT_BYTES
         || !(data.len() - offset).is_multiple_of(stride)
     {
         return false;
@@ -483,6 +539,39 @@ fn sorted_slab(data: &[u8], offset: usize, stride: usize, limit_at: Option<usize
             .chunks_exact(stride)
             .zip(rows.chunks_exact(stride).skip(1))
             .all(|(a, b)| a[..32] < b[..32])
+}
+
+pub fn provider_limit_values<'a>(
+    records: impl Iterator<Item = (&'a str, &'a [u8])> + Clone,
+    config: &Config,
+) -> std::collections::BTreeMap<String, Value> {
+    let pages: std::collections::BTreeMap<_, _> = records
+        .clone()
+        .filter(|(address, data)| {
+            data.starts_with(&PROVIDER_LIMIT_PAGE_DISCRIMINATOR)
+                && validate(address, data, config) == Some(Kind::ProviderLimitPage)
+        })
+        .map(|(address, data)| (data[41], (address, data)))
+        .collect();
+    records.filter_map(|(identity, data)| {
+        if !data.starts_with(&PROVIDER_LIMIT_INDEX_DISCRIMINATOR)
+            || validate(identity, data, config) != Some(Kind::ProviderLimitIndex) {
+            return None;
+        }
+        let id = u32_at(data, 72);
+        let wallet = address(data, 40);
+        let (page, data) = pages.get(&((id & 31) as u8))?;
+        let index = (id >> 5) as usize;
+        if index >= u32_at(data, 44) as usize { return None; }
+        let row = &data[48 + index * 40..48 + (index + 1) * 40];
+        Some((wallet, serde_json::json!({
+            "providerLimitId":id,"providerLimitPage":page,
+            "providerLimits":{"global":{"concurrency":u32_at(row,0),"quota":u32_at(row,4),"quotaWindowSeconds":u32_at(row,8)},
+                "wallet":{"concurrency":u32_at(row,28),"quota":u32_at(row,32),"quotaWindowSeconds":u32_at(row,36)}},
+            "activeBookings":u32_at(row,24),"quotaUsed":u32_at(row,20),"quotaWindowEnd":i64_at(row,12),
+            "bookingLimits":{"walletWindowSeconds":u32_at(row,36),"walletBookingsPerWindow":u32_at(row,32),"walletBookingCapacity":u32_at(row,28)}
+        })))
+    }).collect()
 }
 
 pub fn provider_policy_value(data: &[u8]) -> Option<Value> {
@@ -581,8 +670,11 @@ pub fn bytes(value: &Value) -> Option<Vec<u8>> {
         return None;
     }
     let encoded = value["data"][0].as_str()?;
-    if encoded.len() > 660_000 {
+    if encoded.len() > MAX_ACCOUNT_BYTES.div_ceil(3) * 4 {
         return None;
     }
-    STANDARD.decode(encoded).ok()
+    STANDARD
+        .decode(encoded)
+        .ok()
+        .filter(|data| data.len() <= MAX_ACCOUNT_BYTES)
 }

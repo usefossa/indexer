@@ -40,7 +40,8 @@ pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
         .connect()
         .await
         .map_err(|_| Error::unavailable("gRPC connection failed"))?;
-    let mut client = GeyserClient::new(channel).max_decoding_message_size(2 * 1024 * 1024);
+    let mut client = GeyserClient::new(channel)
+        .max_decoding_message_size(crate::protocol::MAX_ACCOUNT_BYTES + 65536);
     let (requests, receiver) = mpsc::channel(8);
     requests
         .send(SubscribeRequest {
@@ -99,7 +100,7 @@ pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
     loop {
         tokio::select! {
             update=stream.message()=>{let update=update.map_err(|_|Error::unavailable("gRPC stream failed"))?.ok_or(Error::unavailable("gRPC stream closed"))?;match update.update_oneof {
-                Some(UpdateOneof::Account(value))=>{let account=value.account.ok_or(Error::unavailable("Missing gRPC account"))?;if account.pubkey.len()!=32||account.owner.len()!=32||account.data.len()>491568 {return Err(Error::unavailable("Invalid gRPC account"));}let address=bs58::encode(account.pubkey).into_string();let record=if account.lamports==0||account.executable {Record::closed(value.slot,account.write_version)}else{Record{slot:value.slot,version:account.write_version,owner:bs58::encode(account.owner).into_string(),lamports:account.lamports,data:account.data.into()}};tx.send(Event::Accounts(vec![(address,record)])).await.map_err(|_|Error::unavailable("Indexer stopped"))?;},
+                Some(UpdateOneof::Account(value))=>{let account=value.account.ok_or(Error::unavailable("Missing gRPC account"))?;if account.pubkey.len()!=32||account.owner.len()!=32||account.data.len()>crate::protocol::MAX_ACCOUNT_BYTES {return Err(Error::unavailable("Invalid gRPC account"));}let address=bs58::encode(account.pubkey).into_string();let record=if account.lamports==0||account.executable {Record::closed(value.slot,account.write_version)}else{Record{slot:value.slot,version:account.write_version,owner:bs58::encode(account.owner).into_string(),lamports:account.lamports,data:account.data.into()}};tx.send(Event::Accounts(vec![(address,record)])).await.map_err(|_|Error::unavailable("Indexer stopped"))?;},
                 Some(UpdateOneof::Slot(value))=>{if value.slot>slot {slot=value.slot;last=Instant::now();tx.send(Event::Activity(slot)).await.map_err(|_|Error::unavailable("Indexer stopped"))?;}},
                 Some(UpdateOneof::Ping(_))=>requests.send(SubscribeRequest{ping:Some(SubscribeRequestPing{id:1}),..Default::default()}).await.map_err(|_|Error::unavailable("gRPC heartbeat failed"))?,_=>{}
             }},

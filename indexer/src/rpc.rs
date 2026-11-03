@@ -49,7 +49,7 @@ impl Rpc {
         let max = if bulk {
             self.max_bytes
         } else {
-            8 * 1024 * 1024
+            16 * 1024 * 1024
         };
         let bytes = limited(response, max).await?;
         serde_json::from_slice(&bytes)

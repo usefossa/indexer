@@ -15,8 +15,8 @@ use tokio_tungstenite::{
 
 pub async fn connect(config: Config, tx: mpsc::Sender<Event>) -> Result<()> {
     let ws_config = WebSocketConfig::default()
-        .max_message_size(Some(2 * 1024 * 1024))
-        .max_frame_size(Some(2 * 1024 * 1024));
+        .max_message_size(Some(16 * 1024 * 1024))
+        .max_frame_size(Some(16 * 1024 * 1024));
     let (mut socket, _) = tokio::time::timeout(
         Duration::from_secs(10),
         connect_async_with_config(

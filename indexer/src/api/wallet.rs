@@ -89,7 +89,7 @@ async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Va
         .await
         .accounts
         .get(&app.config.market.to_string())
-        .is_some_and(|record| record.data.get(177) == Some(&1));
+        .is_some_and(|record| record.data.get(177).is_some_and(|mode| *mode >= 1));
     let mut addresses = vec![
         session.wallet.clone(),
         source.to_string(),

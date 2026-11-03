@@ -11,16 +11,17 @@ use std::collections::BTreeMap;
 
 pub struct Catalog {
     pub ready: bool,
+    pub source_ready: bool,
     pub directory: std::sync::Arc<crate::profiles::Directory>,
     pub value: Value,
     pub body: Bytes,
     pub message: Utf8Bytes,
 }
 pub fn build(index: &State, config: &Config) -> Catalog {
-    let ready = index.catalog_ready(config);
+    let source_ready = index.catalog_ready(config);
     let directory = index
         .directory
-        .get_or_init(|| std::sync::Arc::new(crate::profiles::Directory::build(index)))
+        .get_or_init(|| std::sync::Arc::new(crate::profiles::Directory::build(index, config)))
         .clone();
     let list = index
         .accounts
@@ -36,36 +37,62 @@ pub fn build(index: &State, config: &Config) -> Catalog {
     let mut metadata = BTreeMap::new();
     let booking_limits =
         protocol::booking_limits(index.accounts.values().map(|record| record.data.as_ref()));
-    let scoped = index
+    let mode = index
         .accounts
         .get(&config.market.to_string())
-        .is_some_and(|record| record.data.get(177) == Some(&1));
+        .and_then(|record| record.data.get(177))
+        .copied()
+        .unwrap_or(0);
+    let scoped = mode >= 1;
+    let shared = mode == 2;
     let routing_address = solana_pubkey::Pubkey::find_program_address(
         &[b"list_routing", config.provider_list.as_ref()],
         &config.program,
     )
     .0
     .to_string();
-    let routing_limits = index
+    let routing = index
         .accounts
         .get(&routing_address)
         .filter(|_| list.is_some_and(|record| record.data.get(80) == Some(&1)))
-        .filter(|record| protocol::address(&record.data, 40) == config.provider_list.to_string())
-        .and_then(|record| protocol::routing_policy_values(&record.data));
-    let ready = ready && (!scoped || routing_limits.is_some());
+        .filter(|record| protocol::address(&record.data, 40) == config.provider_list.to_string());
+    let routing_limits = routing.and_then(|record| protocol::routing_policy_values(&record.data));
+    let ready = source_ready
+        && (!scoped || routing_limits.is_some())
+        && (!shared
+            || routing.is_some_and(|routing| {
+                shared_books_ready(
+                    index,
+                    config,
+                    &directory.provider_limits,
+                    u32_at(&routing.data, 72),
+                )
+            }));
     for (id, r) in &index.accounts {
         match protocol::kind(&r.data) {
             Some(Kind::Provider) if members.contains(&r.data[40..72]) => {
                 if let Some(doc) = metadata::key(&r.data).and_then(|k| index.documents.get(&k)) {
                     let wallet = address(&r.data, 40);
-                    let limits = if scoped {
+                    let limits = if shared {
+                        directory
+                            .provider_limits
+                            .get(&wallet)
+                            .map(|value| &value["bookingLimits"])
+                    } else if scoped {
                         routing_limits
                             .as_ref()
                             .and_then(|limits| limits.get(&wallet))
                     } else {
                         booking_limits.get(&wallet)
                     };
-                    providers.insert(wallet.clone(),json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":limits}));
+                    let mut value = json!({"wallet":wallet,"address":id,"name":doc.value["name"],"endpoint":doc.value["endpoint"],"image":doc.value.get("image"),"requestLimits":doc.value.get("requestLimits"),"bookingLimits":limits});
+                    if shared && let Some(limits) = directory.provider_limits.get(&wallet) {
+                        value
+                            .as_object_mut()
+                            .unwrap()
+                            .extend(limits.as_object().unwrap().clone());
+                    }
+                    providers.insert(wallet, value);
                 }
             }
             Some(Kind::Metadata) => {
@@ -123,16 +150,28 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         } else {
             (address(d, 72), address(d, 104))
         };
-        let (Some(terms), Some(capacity)) = (
-            index.accounts.get(&terms_id),
-            index.accounts.get(&capacity_id),
-        ) else {
+        let Some(terms) = index.accounts.get(&terms_id) else {
             continue;
         };
-        let (t, c) = (&terms.data, &capacity.data);
+        let t = &terms.data;
+        let c = index
+            .accounts
+            .get(&capacity_id)
+            .map(|record| record.data.as_ref())
+            .unwrap_or_default();
         let limit = u32_at(if scoped { t } else { d }, if scoped { 104 } else { 136 });
         let quota_terms = t.starts_with(&protocol::BOOKING_TERMS_DISCRIMINATOR);
-        let count = if scoped {
+        let count = if shared {
+            if protocol::kind(t) != Some(Kind::ListTerms)
+                || t[113] != 1
+                || address(t, 8) != *id
+                || address(t, 40) != config.provider_list.to_string()
+                || address(t, 72) != capacity_id
+            {
+                continue;
+            }
+            u32_at(t, 116)
+        } else if scoped {
             if protocol::kind(t) != Some(Kind::ListTerms)
                 || protocol::kind(c) != Some(Kind::ListCapacity)
                 || address(t, 8) != *id
@@ -203,7 +242,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             let context_tokens = u32_at(t, ti + 120);
             let input_bound_tokens = u32_at(t, ti + 124);
             let output_tokens = u32_at(t, ti + 128);
-            if t[ti + 114] != 1
+            if t[ti + 114] != if shared { 2 } else { 1 }
                 || t[ti + 115] != 0
                 || input_modalities == 0
                 || input_modalities & !15 != 0
@@ -226,7 +265,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 continue;
             };
             if scoped
-                && (address(c, ci) != wallet
+                && ((!shared && address(c, ci) != wallet)
                     || routing_limits
                         .as_ref()
                         .is_none_or(|limits| !limits.contains_key(&wallet)))
@@ -239,8 +278,23 @@ pub fn build(index: &State, config: &Config) -> Catalog {
             {
                 continue;
             }
-            let active = u32_at(c, ci + if scoped { 32 } else { 16 });
-            let capacity = u32_at(t, ti + 116);
+            if shared
+                && provider["providerLimitId"].as_u64() != Some(u64::from(u32_at(t, ti + 132)))
+            {
+                continue;
+            }
+            let active = if shared {
+                provider["activeBookings"].as_u64().unwrap_or(0) as u32
+            } else {
+                u32_at(c, ci + if scoped { 32 } else { 16 })
+            };
+            let capacity = if shared {
+                provider["providerLimits"]["global"]["concurrency"]
+                    .as_u64()
+                    .unwrap_or(0) as u32
+            } else {
+                u32_at(t, ti + 116)
+            };
             let available = ready
                 && group_ready
                 && t[ti + 111] == 1
@@ -258,7 +312,8 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 "inputRate": u32_at(t, ti + 96), "cachedRate": u32_at(t, ti + 100),
                 "outputRate": u32_at(t, ti + 104), "speed": u16_at(t, ti + 108),
                 "private": t[ti + 110] == 1, "active": t[ti + 111] == 1,
-                "capacity": capacity, "activeBookings": active, "available": available
+                "capacity": capacity, "activeBookings": active, "available": available,
+                "providerLimitId": if shared {provider.get("providerLimitId")} else {None}
             }));
         }
         if offers.is_empty() {
@@ -283,16 +338,49 @@ pub fn build(index: &State, config: &Config) -> Catalog {
         .filter_map(|r| metadata::key(&r.data))
         .filter(|key| !index.documents.contains_key(key))
         .count();
-    let value = json!({"aliases":aliases,"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"marketConfig":market_config,"listRoutingEnabled":scoped,"listRouting":solana_pubkey::Pubkey::find_program_address(&[b"list_routing",config.provider_list.as_ref()],&config.program).0.to_string(),"modelGroups":groups.into_values().collect::<Vec<_>>(),"providerList":config.provider_list.to_string(),"providerListFeeBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.0),"providerListProtocolShareBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.1),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
+    let value = json!({"aliases":aliases,"ready":ready,"slot":index.slot,"programId":config.program.to_string(),"market":config.market.to_string(),"marketConfig":market_config,"listRoutingEnabled":scoped,"providerLimitsEnabled":shared,"listRouting":solana_pubkey::Pubkey::find_program_address(&[b"list_routing",config.provider_list.as_ref()],&config.program).0.to_string(),"modelGroups":groups.into_values().collect::<Vec<_>>(),"providerList":config.provider_list.to_string(),"providerListFeeBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.0),"providerListProtocolShareBps":list.and_then(|r|protocol::list_fees(&r.data)).map(|fees|fees.1),"models":models,"metadataPending":pending,"metadataVerified":index.documents.len(),"providers":providers.into_values().collect::<Vec<_>>()});
     let body: Bytes = value.to_string().into();
     let message = format!("{{\"type\":\"catalog\",\"data\":{}}}", value).into();
     Catalog {
         ready,
+        source_ready,
         directory,
         value,
         body,
         message,
     }
+}
+
+fn shared_books_ready(
+    index: &State,
+    config: &Config,
+    limits: &BTreeMap<String, Value>,
+    expected: u32,
+) -> bool {
+    let mut count = 0;
+    for record in index.accounts.values() {
+        let data = &record.data;
+        if protocol::kind(data) != Some(Kind::ListTerms)
+            || protocol::key(data, 40) != Some(config.provider_list)
+        {
+            continue;
+        }
+        count += 1;
+        if data[113] != 1
+            || data[120..120 + u32_at(data, 116) as usize * 140]
+                .chunks_exact(140)
+                .any(|row| {
+                    row[114] != 2
+                        || limits
+                            .get(&address(row, 0))
+                            .and_then(|value| value["providerLimitId"].as_u64())
+                            != Some(u64::from(u32_at(row, 132)))
+                })
+        {
+            return false;
+        }
+    }
+    count == expected
 }
 
 fn modality_names(mask: u8) -> Vec<&'static str> {
