@@ -60,14 +60,18 @@ pub fn build(index: &State, config: &Config) -> Catalog {
     let ready = source_ready
         && (!scoped || routing_limits.is_some())
         && (!shared
-            || routing.is_some_and(|routing| {
-                shared_books_ready(
-                    index,
-                    config,
-                    &directory.provider_limits,
-                    u32_at(&routing.data, 72),
-                )
-            }));
+            || routing
+                .zip(routing_limits.as_ref())
+                .is_some_and(|(routing, admission)| {
+                    shared_books_ready(
+                        index,
+                        config,
+                        &directory,
+                        &members,
+                        admission,
+                        u32_at(&routing.data, 72),
+                    )
+                }));
     for (id, r) in &index.accounts {
         match protocol::kind(&r.data) {
             Some(Kind::Provider) if members.contains(&r.data[40..72]) => {
@@ -354,7 +358,9 @@ pub fn build(index: &State, config: &Config) -> Catalog {
 fn shared_books_ready(
     index: &State,
     config: &Config,
-    limits: &BTreeMap<String, Value>,
+    directory: &crate::profiles::Directory,
+    members: &std::collections::HashSet<&[u8]>,
+    admission: &BTreeMap<String, Value>,
     expected: u32,
 ) -> bool {
     let mut count = 0;
@@ -370,11 +376,17 @@ fn shared_books_ready(
             || data[120..120 + u32_at(data, 116) as usize * 140]
                 .chunks_exact(140)
                 .any(|row| {
+                    let provider = address(row, 0);
                     row[114] != 2
-                        || limits
-                            .get(&address(row, 0))
+                        || directory
+                            .provider_limits
+                            .get(&provider)
                             .and_then(|value| value["providerLimitId"].as_u64())
                             != Some(u64::from(u32_at(row, 132)))
+                        || row[111] == 1
+                            && members.contains(&row[..32])
+                            && admission.contains_key(&provider)
+                            && !directory.providers.contains_key(&provider)
                 })
         {
             return false;

@@ -232,11 +232,13 @@ fn metadata(
     )
 }
 
-#[tokio::test]
-async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_updates() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = common::config(dir.path());
-    let app = App::new(config.clone()).await.unwrap();
+struct SharedFixture {
+    provider: Pubkey,
+    limits: [(String, Vec<u8>); 2],
+    books: Vec<(String, Vec<u8>)>,
+}
+
+async fn shared_fixture(app: &App, config: &Config) -> SharedFixture {
     let provider = Pubkey::new_from_array([8; 32]);
     let mut market = vec![0; 248];
     market[..8].copy_from_slice(&protocol::MARKET_DISCRIMINATOR);
@@ -272,10 +274,10 @@ async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_upda
         (config.provider_list.to_string(), list),
         (routing.to_string(), admission),
     ];
-    let limit_rows = limits(&config, provider, 7);
+    let limit_rows = limits(config, provider, 7);
     rows.extend(limit_rows.clone());
     let (address, data, key, doc) = metadata(
-        &config,
+        config,
         provider,
         json!({"name":"Example","endpoint":"https://example.com/v1/chat/completions"}),
         true,
@@ -301,7 +303,7 @@ async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_upda
         data[140] = bump;
         rows.push((model.to_string(), data));
         let (address, data, key, doc) = metadata(
-            &config,
+            config,
             model,
             json!({"id":id,"name":"Example Model","checkpoints":[{"id":"revision","name":"Revision"}],"modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100}),
             false,
@@ -338,16 +340,16 @@ async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_upda
     }
     for (address, data) in &rows {
         assert!(
-            protocol::validate(address, data, &config).is_some(),
+            protocol::validate(address, data, config).is_some(),
             "{address}"
         );
     }
     app.index
         .apply(
             &app.db,
-            &config,
+            config,
             rows.into_iter()
-                .map(|(address, data)| (address, record(&config, 10, data)))
+                .map(|(address, data)| (address, record(config, 10, data)))
                 .collect(),
             Some(10),
         )
@@ -356,6 +358,23 @@ async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_upda
     app.index.state.write().await.documents.extend(documents);
     app.index.connected(true).await;
     app.index.activity().await;
+    SharedFixture {
+        provider,
+        limits: limit_rows,
+        books,
+    }
+}
+
+#[tokio::test]
+async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let app = App::new(config.clone()).await.unwrap();
+    let SharedFixture {
+        provider,
+        limits: limit_rows,
+        books,
+    } = shared_fixture(&app, &config).await;
     let catalog = app.index.catalog(&config).await;
     assert!(catalog.ready);
     assert_eq!(catalog.value["providerLimitsEnabled"], true);
@@ -464,4 +483,173 @@ async fn shared_catalog_uses_canonical_limits_across_models_and_invalidates_upda
     assert!(!missing.ready);
     assert!(missing.value["models"].as_array().unwrap().is_empty());
     assert!(missing.directory.providers[&provider.to_string()]["bookingLimits"].is_null());
+}
+
+#[tokio::test]
+async fn shared_catalog_requires_metadata_only_for_active_admitted_offers() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = common::config(dir.path());
+    let app = App::new(config.clone()).await.unwrap();
+    let fixture = shared_fixture(&app, &config).await;
+    let provider = Pubkey::new_from_array([9; 32]);
+    let routing = Pubkey::find_program_address(
+        &[b"list_routing", config.provider_list.as_ref()],
+        &config.program,
+    )
+    .0
+    .to_string();
+    let state = app.index.state.read().await;
+    let mut list = state.accounts[&config.provider_list.to_string()]
+        .data
+        .to_vec();
+    let mut admission = state.accounts[&routing].data.to_vec();
+    drop(state);
+    list.extend_from_slice(provider.as_ref());
+    word(&mut list, 72, 2);
+    word(&mut list, 84, 2);
+    admission.extend_from_within(84..140);
+    admission[140..172].copy_from_slice(provider.as_ref());
+    word(&mut admission, 80, 2);
+    let mut rows = vec![
+        (config.provider_list.to_string(), list),
+        (routing, admission),
+    ];
+    for (address, mut data) in fixture.books {
+        data.extend_from_within(120..260);
+        data[260..292].copy_from_slice(provider.as_ref());
+        data[292..324].copy_from_slice(provider.as_ref());
+        for (at, value) in [
+            (104, 2),
+            (108, 2),
+            (116, 2),
+            (356, 1),
+            (364, 2),
+            (392, 8),
+            (396, 1),
+        ] {
+            word(&mut data, at, value);
+        }
+        rows.push((address, data));
+    }
+    let (profile, data, key, document) = metadata(
+        &config,
+        provider,
+        json!({"name":"Second Provider","endpoint":"https://example.org/v1/chat/completions"}),
+        true,
+    );
+    let profile_row = (profile.clone(), data);
+    let mut setup = rows.clone();
+    setup.push(profile_row.clone());
+    setup.extend(limits(&config, provider, 8));
+    setup.push(fixture.limits[0].clone());
+    for (_, data) in &mut setup {
+        if protocol::kind(data) == Some(Kind::ProviderLimitPage) {
+            word(data, 68, 7);
+        }
+    }
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            setup
+                .into_iter()
+                .map(|(address, data)| (address, record(&config, 11, data)))
+                .collect(),
+            None,
+        )
+        .await
+        .unwrap();
+    let missing = app.index.catalog(&config).await;
+    assert!(!missing.ready);
+    assert!(Arc::ptr_eq(&missing, &app.index.catalog(&config).await));
+    assert_eq!(missing.directory.provider_limits.len(), 2);
+    for model in missing.value["models"].as_array().unwrap() {
+        assert_eq!(model["offerCount"], 2);
+        assert_eq!(model["offers"].as_array().unwrap().len(), 1);
+        assert_eq!(model["offers"][0]["available"], false);
+    }
+    for (step, reason) in ["removed", "frozen", "inactive"].into_iter().enumerate() {
+        let mut updates = rows.clone();
+        match reason {
+            "removed" => {
+                word(&mut updates[0].1, 84, 1);
+                updates[0].1[120..152].fill(0);
+            }
+            "frozen" => updates[1].1[192] = 0,
+            _ => {
+                for (_, data) in &mut updates[2..] {
+                    data[371] = 0;
+                }
+            }
+        }
+        app.index
+            .apply(
+                &app.db,
+                &config,
+                updates
+                    .into_iter()
+                    .map(|(address, data)| (address, record(&config, 12 + step as u64, data)))
+                    .collect(),
+                None,
+            )
+            .await
+            .unwrap();
+        let catalog = app.index.catalog(&config).await;
+        assert!(catalog.ready, "{reason}");
+        assert_eq!(catalog.directory.provider_limits.len(), 2);
+        for model in catalog.value["models"].as_array().unwrap() {
+            assert_eq!(model["offerCount"], 2);
+            assert_eq!(model["offers"].as_array().unwrap().len(), 1);
+            assert_eq!(model["offers"][0]["available"], true, "{reason}");
+        }
+    }
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            rows.into_iter()
+                .map(|(address, data)| (address, record(&config, 15, data)))
+                .collect(),
+            None,
+        )
+        .await
+        .unwrap();
+    let missing = app.index.catalog(&config).await;
+    assert!(!missing.ready);
+    {
+        let mut state = app.index.state.write().await;
+        state.documents.insert(key, document);
+        state.cached = None;
+        state.directory.take();
+    }
+    let complete = app.index.catalog(&config).await;
+    assert!(complete.ready);
+    assert!(!Arc::ptr_eq(&missing, &complete));
+    for model in complete.value["models"].as_array().unwrap() {
+        let offers = model["offers"].as_array().unwrap();
+        assert_eq!(offers.len(), 2);
+        assert!(offers.iter().all(|offer| offer["available"] == true));
+        assert_eq!(offers[1]["provider"]["wallet"], provider.to_string());
+        assert!(offers[1]["inputRate"].as_u64() < offers[0]["inputRate"].as_u64());
+    }
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(profile.clone(), Record::closed(16, 16))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!app.index.catalog(&config).await.ready);
+    app.index
+        .apply(
+            &app.db,
+            &config,
+            vec![(profile, record(&config, 17, profile_row.1))],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(app.index.catalog(&config).await.ready);
 }
