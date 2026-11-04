@@ -1,11 +1,35 @@
 # indexer
 
-standalone rust protocol indexer and client api. source, tests and build settings live under `indexer/`. read [documentation](https://fossa.ag/docs/users/self-hosting) before changing protocol or api behavior.
+## scope
 
-- use compact modules, exact integer accounting and bounded work. preserve canonical account validation, freshness checks and restart recovery.
-- keep inference direct between client and provider. never introduce signing keys, custody, vendor-specific transport dependencies or external service requirements.
-- local secrets and settings belong in ignored `.env`; examples use placeholders. never log tokens, signed messages or credentials.
-- no commits, pushes, deployments, dev servers or extra documentation unless requested. no screenshots. use subagents only when requested.
-- requested commit/push requires `cargo fmt --check`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked` and final review from `indexer/`. bump semver for behavior changes.
-- commit format: `[fix]`, `[feat]`, `[add]` or `[update]`, lowercase single line, no attribution. prose and comments lowercase; preserve normal user-facing copy and identifier casing.
-- readmes contain documentation links only. public docs explain roles, trust boundaries and verified behavior without private operational details.
+standalone protocol indexer and compatible client API. source, tests, and build settings live under `indexer/`. read [self-hosting documentation](https://fossa.ag/docs/users/self-hosting) before changing protocol or API behavior.
+
+## workflow
+
+- read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
+- deployments and package publication require an explicit request. preserve unrelated local settings and durable indexed data.
+
+## implementation
+
+- use compact modules, exact integer accounting, and bounded work. preserve canonical account validation, freshness checks, and restart recovery.
+- keep inference direct between client and provider. do not introduce signing keys, custody, vendor-specific transport dependencies, or mandatory external services.
+- keep readmes to documentation links: one properly capitalized link per component, each on its own line. public documentation explains roles, trust boundaries, and verified behavior without private operational details.
+
+## configuration and security
+
+- local secrets and settings belong in ignored `.env` files. examples contain placeholders only.
+- never log or commit tokens, signed messages, credentials, private state, or generated artifacts.
+- preserve existing databases and recovery state; maintenance does not authorize destructive resets.
+
+## verification
+
+- before a requested commit or push, run `cargo fmt --check`, `cargo check --locked`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked` from `indexer/`, then review the final diff.
+- ordinary tests use isolated synthetic state and require no production credentials. live checks require explicit opt-in.
+
+## commits and releases
+
+- create commits and push only when explicitly requested.
+- use `[type] short description`; allowed types are `[fix]`, `[feat]`, `[add]`, and `[update]`.
+- messages must be one lowercase line. combine multiple changes with `+`.
+- never add attribution or `co-authored-by` trailers.
+- bump affected versions with semver for behavior or release changes. tag requested releases `vX.Y.Z`.
