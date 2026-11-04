@@ -14,6 +14,7 @@ pub struct Config {
     pub program: Pubkey,
     pub market: Pubkey,
     pub provider_list: Pubkey,
+    pub provider_limit_lookup_tables: Vec<Pubkey>,
     pub mint: Pubkey,
     pub genesis: String,
     pub commitment: String,
@@ -64,6 +65,10 @@ impl Config {
                 "FOSSA_PROVIDER_LIST",
                 "6jgtRvRwspmxJXC2hoqUKRgAHeb2pFMiTD7n5p33hcFB",
             )?,
+            provider_limit_lookup_tables: lookup_tables(&get(
+                "FOSSA_PROVIDER_LIMIT_LOOKUP_TABLES",
+                "",
+            ))?,
             mint: key(
                 "FOSSA_USDC_MINT",
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
@@ -99,6 +104,12 @@ impl Config {
             return Err(Error::bad("Set FOSSA_WS_URL or FOSSA_GRPC_URL"));
         }
         if !matches!(self.commitment.as_str(), "confirmed" | "finalized")
+            || self.provider_limit_lookup_tables.len() > 32
+            || self
+                .provider_limit_lookup_tables
+                .iter()
+                .enumerate()
+                .any(|(index, key)| self.provider_limit_lookup_tables[..index].contains(key))
             || self.genesis.is_empty()
             || self.reconcile < Duration::from_secs(1)
             || self.stale < Duration::from_secs(3)
@@ -115,6 +126,23 @@ impl Config {
         }
         Ok(())
     }
+}
+fn lookup_tables(value: &str) -> Result<Vec<Pubkey>> {
+    let addresses: Vec<_> = value
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if addresses.len() > 32 {
+        return Err(Error::bad("Too many provider limit lookup tables"));
+    }
+    addresses
+        .into_iter()
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| Error::bad("Invalid provider limit lookup table"))
+        })
+        .collect()
 }
 fn endpoint(value: &str, schemes: &[&str], public: bool) -> Result<()> {
     let url = reqwest::Url::parse(value).map_err(|_| Error::bad("Invalid configured endpoint"))?;
@@ -134,4 +162,74 @@ fn endpoint(value: &str, schemes: &[&str], public: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            rpc_url: "http://127.0.0.1:9".into(),
+            ws_url: Some("ws://127.0.0.1:9".into()),
+            grpc_url: None,
+            grpc_token: None,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_url: "http://127.0.0.1:8790".into(),
+            database: "unused".into(),
+            program: Pubkey::new_from_array([1; 32]),
+            market: Pubkey::new_from_array([2; 32]),
+            provider_list: Pubkey::new_from_array([3; 32]),
+            provider_limit_lookup_tables: vec![],
+            mint: Pubkey::new_from_array([4; 32]),
+            genesis: "test".into(),
+            commitment: "confirmed".into(),
+            reconcile: Duration::from_secs(1),
+            stale: Duration::from_secs(3),
+            max_accounts: 1000,
+            max_rpc_bytes: 1_048_576,
+            max_connections: 8,
+            request_limit: 1000,
+            auth_limit: 100,
+            access_secs: 3600,
+            refresh_secs: 86400,
+        }
+    }
+
+    #[test]
+    fn lookup_table_parser_accepts_empty_or_comma_and_ascii_whitespace_separated_keys() {
+        for value in ["", " , \t\n\r,, "] {
+            assert!(lookup_tables(value).unwrap().is_empty());
+        }
+        let expected: Vec<_> = (1..=3)
+            .map(|byte| Pubkey::new_from_array([byte; 32]))
+            .collect();
+        let value = format!(" {},\t{}\n,{} ", expected[0], expected[1], expected[2]);
+        assert_eq!(lookup_tables(&value).unwrap(), expected);
+        for value in ["not-a-key", "1", "0OIl"] {
+            assert!(lookup_tables(value).is_err());
+        }
+    }
+
+    #[test]
+    fn configured_lookup_tables_reject_duplicates_and_enforce_bound_for_direct_configs() {
+        let mut config = config();
+        assert!(config.validate().is_ok());
+        let keys: Vec<_> = (1..=33)
+            .map(|byte| Pubkey::new_from_array([byte; 32]))
+            .collect();
+        config.provider_limit_lookup_tables = keys[..32].to_vec();
+        assert!(config.validate().is_ok());
+        let encoded = keys
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(lookup_tables(&encoded).is_err());
+        config.provider_limit_lookup_tables = keys;
+        assert!(config.validate().is_err());
+        let key = config.program;
+        config.provider_limit_lookup_tables = lookup_tables(&format!("{key}, {key}")).unwrap();
+        assert!(config.validate().is_err());
+    }
 }

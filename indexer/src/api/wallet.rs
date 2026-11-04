@@ -55,6 +55,7 @@ pub async fn snapshot(app: &App, session: &Session) -> Result<Value> {
     {
         let mut value = value.clone();
         value["bookings"] = json!(booking_pool(app, session).await);
+        value["transactionFees"] = app.fees.snapshot();
         return Ok(value);
     }
     for _ in 0..2 {
@@ -172,7 +173,7 @@ async fn fetch_snapshot(app: &App, session: &Session, minimum: u64) -> Result<Va
     };
     let bookings = booking_pool(app, session).await;
     Ok(
-        json!({"wallet":session.wallet,"lane":session.lane,"vault":vault.to_string(),"source":source.to_string(),"ready":initialized,"lamports":lamports.to_string(),"usdcAtomic":usdc.to_string(),"freeAtomic":free.to_string(),"generation":generation.to_string(),"bookings":bookings,"providerWallet":provider_wallet_snapshot,"slot":slot,"slots":[slot,slot,slot]}),
+        json!({"wallet":session.wallet,"lane":session.lane,"vault":vault.to_string(),"source":source.to_string(),"ready":initialized,"lamports":lamports.to_string(),"usdcAtomic":usdc.to_string(),"freeAtomic":free.to_string(),"generation":generation.to_string(),"bookings":bookings,"providerWallet":provider_wallet_snapshot,"transactionFees":app.fees.snapshot(),"slot":slot,"slots":[slot,slot,slot]}),
     )
 }
 pub async fn booking_pool(app: &App, session: &Session) -> Vec<Value> {

@@ -8,7 +8,7 @@ use futures_util::{StreamExt, stream};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Receipt {
@@ -425,7 +425,8 @@ async fn process(app: &App, turn: u8, blocks: &mut crate::one_shot::Blocks) -> R
             &app.config.program.to_string(),
             &app.config.market.to_string(),
         );
-        app.db
+        let receipts = app
+            .db
             .call(move |conn| {
                 let transaction = conn.transaction()?;
                 crate::usage::store(&transaction, &bookings, &receipts)?;
@@ -435,9 +436,12 @@ async fn process(app: &App, turn: u8, blocks: &mut crate::one_shot::Blocks) -> R
                     [signature],
                 )?;
                 transaction.commit()?;
-                Ok(())
+                Ok(receipts)
             })
             .await?;
+        for receipt in receipts {
+            let _ = app.receipts.send(Arc::new(receipt));
+        }
     }
     Ok(count)
 }

@@ -5,6 +5,7 @@ pub mod chain;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod fees;
 pub mod index;
 pub mod metadata;
 pub mod one_shot;
@@ -19,7 +20,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, broadcast, watch};
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -43,6 +44,8 @@ pub struct Inner {
     pub http_requests: Arc<Semaphore>,
     pub limits: auth::Limits,
     pub chain: watch::Sender<Option<Arc<serde_json::Value>>>,
+    pub fees: fees::Fees,
+    pub receipts: broadcast::Sender<Arc<receipts::Receipt>>,
     pub shutdown: watch::Sender<bool>,
 }
 impl std::ops::Deref for App {
@@ -71,6 +74,8 @@ impl App {
             http_requests: Arc::new(Semaphore::new(256)),
             limits: auth::Limits::default(),
             chain: watch::channel(None).0,
+            fees: fees::Fees::default(),
+            receipts: broadcast::channel(256).0,
             shutdown: watch::channel(false).0,
         })))
     }
@@ -80,6 +85,11 @@ impl App {
             tokio::spawn(metadata::run(self.clone())),
             tokio::spawn(receipts::run(self.clone())),
             tokio::spawn(api::wallet::quotes(self.clone())),
+            tokio::spawn(fees::run(
+                self.rpc.clone(),
+                self.fees.clone(),
+                self.shutdown.subscribe(),
+            )),
         ]
     }
 }

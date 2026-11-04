@@ -59,9 +59,10 @@ async fn snapshot(app: App, boundary: u64, clock: u64) -> Result<(u64, Vec<(Stri
 async fn session(app: &App) -> Result<()> {
     let (tx, mut rx) = mpsc::channel(2048);
     let config = app.config.clone();
+    let fees = app.fees.clone();
     let mut source = tokio::spawn(async move {
         if config.grpc_url.is_some() {
-            grpc::connect(config, tx).await
+            grpc::connect(config, tx, fees).await
         } else {
             ws::connect(config, tx).await
         }

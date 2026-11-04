@@ -12,9 +12,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bincode::Options;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::Value;
-use solana_transaction::Transaction;
+use solana_transaction::versioned::VersionedTransaction;
+use std::collections::HashSet;
 
-pub fn validate_transaction(raw: &str, wallet: &str, program: &str) -> Result<()> {
+fn decode_transaction(raw: &str) -> Result<VersionedTransaction> {
     if raw.len() > 1644 {
         return Err(Error::bad("Transaction exceeds packet limit"));
     }
@@ -24,36 +25,64 @@ pub fn validate_transaction(raw: &str, wallet: &str, program: &str) -> Result<()
     if bytes.len() > 1232 {
         return Err(Error::bad("Transaction exceeds packet limit"));
     }
-    let tx: Transaction = bincode::options()
+    let tx: VersionedTransaction = bincode::options()
         .with_fixint_encoding()
         .with_limit(1232)
         .reject_trailing_bytes()
         .deserialize(&bytes)
-        .map_err(|_| Error::bad("Only signed legacy transactions are supported"))?;
-    let count = usize::from(tx.message.header.num_required_signatures);
-    let keys = &tx.message.account_keys;
-    if count == 0
-        || tx.signatures.len() != count
-        || keys.len() < count
-        || usize::from(tx.message.header.num_readonly_signed_accounts) >= count
-        || usize::from(tx.message.header.num_readonly_unsigned_accounts) > keys.len() - count
-        || keys[0].to_string() != wallet
-    {
+        .map_err(|_| Error::bad("Invalid legacy or v0 transaction"))?;
+    tx.sanitize()
+        .map_err(|_| Error::bad("Invalid transaction message"))?;
+    Ok(tx)
+}
+
+fn validate_message(
+    tx: &VersionedTransaction,
+    wallet: &str,
+    program: &str,
+    unsigned: bool,
+) -> Result<()> {
+    let count = usize::from(tx.message.header().num_required_signatures);
+    let keys = tx.message.static_account_keys();
+    if keys.first().is_none_or(|key| key.to_string() != wallet) {
         return Err(Error(
             StatusCode::FORBIDDEN,
             "Transaction payer must be authenticated wallet",
         ));
     }
+    let mut unique = HashSet::new();
+    if keys.iter().any(|key| !unique.insert(key)) {
+        return Err(Error::bad("Duplicate static transaction account"));
+    }
+    let mut tables = HashSet::new();
+    for lookup in tx.message.address_table_lookups().unwrap_or_default() {
+        let mut indexes = HashSet::new();
+        if !tables.insert(lookup.account_key)
+            || lookup
+                .writable_indexes
+                .iter()
+                .chain(&lookup.readonly_indexes)
+                .any(|index| !indexes.insert(index))
+        {
+            return Err(Error::bad("Duplicate lookup table or account index"));
+        }
+    }
     let message =
         bincode::serialize(&tx.message).map_err(|_| Error::bad("Invalid transaction message"))?;
     for (signature, key) in tx.signatures.iter().zip(&keys[..count]) {
+        if unsigned {
+            if signature.as_ref().iter().any(|byte| *byte != 0) {
+                return Err(Error::bad("Unsigned simulation requires empty signatures"));
+            }
+            continue;
+        }
         let signature = Signature::from_slice(signature.as_ref())
             .map_err(|_| Error::bad("Invalid signature size"))?;
         VerifyingKey::from_bytes(&key.to_bytes())
             .and_then(|k| k.verify_strict(&message, &signature))
             .map_err(|_| Error::bad("Invalid transaction signature"))?;
     }
-    for instruction in &tx.message.instructions {
+    for instruction in tx.message.instructions() {
         let id = keys
             .get(instruction.program_id_index as usize)
             .ok_or(Error::bad("Invalid instruction program"))?
@@ -66,10 +95,6 @@ pub fn validate_transaction(raw: &str, wallet: &str, program: &str) -> Result<()
             protocol::ATA,
         ]
         .contains(&id.as_str())
-            || instruction
-                .accounts
-                .iter()
-                .any(|i| *i as usize >= keys.len())
         {
             return Err(Error(
                 StatusCode::FORBIDDEN,
@@ -78,6 +103,45 @@ pub fn validate_transaction(raw: &str, wallet: &str, program: &str) -> Result<()
         }
     }
     Ok(())
+}
+
+pub fn validate_transaction(raw: &str, wallet: &str, program: &str) -> Result<()> {
+    validate_message(&decode_transaction(raw)?, wallet, program, false)
+}
+
+fn validate_simulation(raw: &str, wallet: &str, program: &str, options: &Value) -> Result<()> {
+    let options = options
+        .as_object()
+        .ok_or(Error::bad("Invalid simulation options"))?;
+    if options.keys().any(|key| {
+        ![
+            "encoding",
+            "sigVerify",
+            "commitment",
+            "minContextSlot",
+            "replaceRecentBlockhash",
+        ]
+        .contains(&key.as_str())
+    }) || options.get("commitment").is_some_and(|value| {
+        !matches!(
+            value.as_str(),
+            Some("processed" | "confirmed" | "finalized")
+        )
+    }) || options
+        .get("minContextSlot")
+        .is_some_and(|value| value.as_u64().is_none())
+        || options
+            .get("replaceRecentBlockhash")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(Error::bad("Invalid simulation options"));
+    }
+    let unsigned = match options.get("sigVerify").and_then(Value::as_bool) {
+        Some(false) => true,
+        Some(true) if options.get("replaceRecentBlockhash") != Some(&Value::Bool(true)) => false,
+        _ => return Err(Error::bad("Simulation requires explicit signature policy")),
+    };
+    validate_message(&decode_transaction(raw)?, wallet, program, unsigned)
 }
 pub async fn rpc(
     State(app): State<App>,
@@ -102,6 +166,7 @@ pub async fn rpc(
             | "getBalance"
             | "getTokenAccountBalance"
             | "getHealth"
+            | "simulateTransaction"
             | "sendTransaction"
     ) {
         return Err(Error(StatusCode::FORBIDDEN, "RPC method not allowed"));
@@ -129,7 +194,7 @@ pub async fn rpc(
             return Err(Error::bad("Invalid RPC account or signature list"));
         }
     }
-    if method == "sendTransaction" {
+    if matches!(method, "sendTransaction" | "simulateTransaction") {
         if !app.index.ready(&app.config).await {
             return Err(Error::unavailable(
                 "Indexer synchronizing; transaction not forwarded",
@@ -137,11 +202,20 @@ pub async fn rpc(
         }
         let raw = body["params"][0]
             .as_str()
-            .ok_or(Error::bad("Missing signed transaction"))?;
+            .ok_or(Error::bad("Missing transaction"))?;
         if body["params"][1]["encoding"] != "base64" {
             return Err(Error::bad("Use base64 transaction encoding"));
         }
-        validate_transaction(raw, &session.wallet, &app.config.program.to_string())?;
+        if method == "sendTransaction" {
+            validate_transaction(raw, &session.wallet, &app.config.program.to_string())?;
+        } else {
+            validate_simulation(
+                raw,
+                &session.wallet,
+                &app.config.program.to_string(),
+                &body["params"][1],
+            )?;
+        }
     }
     Ok(Json(app.rpc.raw(&body, false).await?))
 }

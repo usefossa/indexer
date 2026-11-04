@@ -96,8 +96,11 @@ async fn send_records(
     Ok(())
 }
 async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<()> {
+    let owner = auth::session(&app, &headers).await?.wallet;
     let mut changes = app.index.changes.subscribe();
     let mut quotes = app.chain.subscribe();
+    let mut fees = app.fees.updates.subscribe();
+    let mut receipts = app.receipts.subscribe();
     let mut shutdown = app.shutdown.subscribe();
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -106,11 +109,34 @@ async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<(
     let mut input_window = Instant::now();
     let mut last_catalog = app.index.catalog(&app.config).await;
     send(&mut socket, last_catalog.message.clone()).await?;
+    send(&mut socket, json!({"type":"resync"}).to_string().into()).await?;
+    send(
+        &mut socket,
+        json!({"type":"fees","data":app.fees.snapshot()})
+            .to_string()
+            .into(),
+    )
+    .await?;
+    let quote = quotes.borrow_and_update().clone();
+    if quote.is_some() {
+        send(
+            &mut socket,
+            json!({"type":"chain","data":quote}).to_string().into(),
+        )
+        .await?;
+    }
     let mut snapshots = tokio::task::JoinSet::new();
     let mut fallbacks = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
         _ = shutdown.changed() => return Ok(()),
+            receipt=receipts.recv()=>match receipt {
+                Ok(receipt) if receipt.owner == owner => send(&mut socket,json!({"type":"receipt","commitment":"confirmed","data":receipt}).to_string().into()).await?,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>send(&mut socket,json!({"type":"resync"}).to_string().into()).await?,
+                Err(tokio::sync::broadcast::error::RecvError::Closed)=>return Ok(()),
+                _=>{},
+            },
+            change=fees.changed()=>{if change.is_err(){return Ok(());}fees.borrow_and_update();send(&mut socket,json!({"type":"fees","data":app.fees.snapshot()}).to_string().into()).await?;},
             incoming=socket.recv()=>{
                 if input_window.elapsed()>=Duration::from_secs(60){input_window=Instant::now();input_count=0;}
                 input_count+=1;if input_count>120{return Err(Error(StatusCode::TOO_MANY_REQUESTS,"Too many live messages"));}

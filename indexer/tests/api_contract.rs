@@ -37,6 +37,7 @@ struct MockState {
     fail_wallet: AtomicBool,
     online: AtomicBool,
     forwarded: AtomicU64,
+    fee_reads: AtomicU64,
 }
 impl Mock {
     fn account(&self, address: &str) -> Value {
@@ -91,6 +92,10 @@ async fn mock_rpc(State(mock): State<Mock>, Json(body): Json<Value>) -> Json<Val
         }
         "getMinimumBalanceForRentExemption" => json!(1000),
         "getFeeForMessage" => json!({"context":{"slot":slot},"value":5000}),
+        "getRecentPrioritizationFees" => {
+            mock.0.fee_reads.fetch_add(1, Ordering::Relaxed);
+            json!([{"slot":slot,"prioritizationFee":600}])
+        }
         "getSignaturesForAddress" => json!([]),
         "getTransaction" => Value::Null,
         "getSignatureStatuses" => json!({"context":{"slot":slot},"value":[null]}),
@@ -184,6 +189,7 @@ impl Fixture {
             fail_wallet: AtomicBool::new(false),
             online: AtomicBool::new(true),
             forwarded: AtomicU64::new(0),
+            fee_reads: AtomicU64::new(0),
         }));
         let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
@@ -207,6 +213,7 @@ impl Fixture {
             program: Pubkey::from_str("routeppVPc5WdqJ2s4foU8QMFYVfQ3HjmucMycBED41").unwrap(),
             market: Pubkey::from_str("HwZJcXPHhQFfGYivpVFDrn65EYoksMt7zZLeZWgyYAv").unwrap(),
             provider_list: Pubkey::new_from_array([4; 32]),
+            provider_limit_lookup_tables: vec![Pubkey::new_from_array([61; 32])],
             mint: Pubkey::from_str("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v").unwrap(),
             genesis: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".into(),
             commitment: "confirmed".into(),
@@ -421,6 +428,10 @@ async fn native_api_auth_wallet_precision_and_revocation() {
         config["providerList"],
         fixture.app.config.provider_list.to_string()
     );
+    let tables = json!([fixture.app.config.provider_limit_lookup_tables[0].to_string()]);
+    assert_eq!(config["providerLimitLookupTables"], tables);
+    let catalog = fixture.authorized("/v1/market/catalog", "").await;
+    assert_eq!(catalog["providerLimitLookupTables"], tables);
     assert!(config["opencode"]["maxInputTokens"].as_u64().unwrap() > 0);
     let session = fixture.login().await;
     let access = session["access"].as_str().unwrap();
@@ -429,6 +440,10 @@ async fn native_api_auth_wallet_precision_and_revocation() {
     assert_eq!(wallet["freeAtomic"], "123456");
     assert_eq!(wallet["usdcAtomic"], "9007199254740993");
     assert_eq!(wallet["generation"], "7");
+    assert_eq!(wallet["transactionFees"]["baselineFloorLamports"], 1000);
+    fixture.app.fees.updates.send_replace(900);
+    let cached = fixture.authorized("/v1/opencode/wallet", access).await;
+    assert_eq!(cached["transactionFees"]["baselineMicroLamports"], 900);
     assert_eq!(
         wallet["vault"],
         protocol::vault(&fixture.lane, &fixture.app.config).to_string()
@@ -674,7 +689,9 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {access}").parse().unwrap());
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(request.clone())
+        .await
+        .unwrap();
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
             json!({"watch":fixture.booking.to_string()})
@@ -685,7 +702,7 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
         .unwrap();
     let mut kinds = std::collections::HashSet::new();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while kinds.len() < 4 {
+        while kinds.len() < 6 {
             let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = socket.next().await
             else {
                 continue;
@@ -698,7 +715,22 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
                 }
                 "wallet" => {
                     assert_eq!(value["data"]["lane"], fixture.lane.to_string());
+                    assert_eq!(
+                        value["data"]["transactionFees"]["baselineFloorLamports"],
+                        1000
+                    );
                     kinds.insert("wallet");
+                }
+                "fees" => {
+                    assert!(value["data"]["baselineMicroLamports"].is_u64());
+                    assert_eq!(value["data"]["baselineFloorLamports"], 1000);
+                    assert_eq!(value["data"]["baselineCapLamports"], 10000);
+                    if value["data"]["baselineMicroLamports"] == 600 {
+                        kinds.insert("fees");
+                    }
+                }
+                "resync" => {
+                    kinds.insert("resync");
                 }
                 "chain" if value["data"].is_object() => {
                     assert!(value["data"]["blockhash"].is_string());
@@ -726,6 +758,23 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
     })
     .await
     .expect("native live envelopes");
+    let fee_reads = fixture.mock.0.fee_reads.load(Ordering::Relaxed);
+    assert_eq!(fee_reads, 1);
+    fixture.app.fees.updates.send_replace(999);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = socket.next().await
+            else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            if value["type"] == "fees" && value["data"]["baselineMicroLamports"] == 999 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("fee changes stream without wallet polling");
     fixture.booking_data[152..160].copy_from_slice(&8u64.to_le_bytes());
     fixture.mock.put(
         &fixture.booking.to_string(),
@@ -774,6 +823,93 @@ async fn live_wire_contract_and_rpc_denials_survive_reconnect() {
     fixture.ready(false).await;
     fixture.mock.0.online.store(true, Ordering::Relaxed);
     fixture.ready(true).await;
+    socket.close(None).await.unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut kinds = std::collections::HashSet::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while kinds.len() < 3 {
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = socket.next().await
+            else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            if let Some(kind @ ("fees" | "chain" | "resync")) = value["type"].as_str() {
+                kinds.insert(kind.to_owned());
+            }
+        }
+    })
+    .await
+    .expect("reconnect immediately restores shared quotes and fees");
+    assert_eq!(fixture.mock.0.fee_reads.load(Ordering::Relaxed), fee_reads);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn live_receipts_preserve_wallet_scope_and_exact_accounting() {
+    let fixture = Fixture::new().await;
+    let session = fixture.login().await;
+    let mut request = format!("{}/v1/opencode/live", fixture.base.replace("http:", "ws:"))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", session["access"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    loop {
+        let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = socket.next().await
+        else {
+            continue;
+        };
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        if value["type"] == "resync" {
+            break;
+        }
+    }
+    let receipt = fossa_indexer::receipts::Receipt {
+        version: 2,
+        bucket: Pubkey::new_from_array([71; 32]).to_string(),
+        epoch: 1,
+        index: 0,
+        receipt: String::new(),
+        model: "fixture".into(),
+        provider: Pubkey::new_from_array([72; 32]).to_string(),
+        owner: session["wallet"].as_str().unwrap().into(),
+        booking: fixture.booking.to_string(),
+        generation: "7".into(),
+        charge: "9007199254740993".into(),
+        deadline: 100,
+        time: 10,
+        tokens: 1,
+        signature: String::new(),
+        slot: 200,
+    };
+    let mut foreign = receipt.clone();
+    foreign.owner = Pubkey::new_from_array([73; 32]).to_string();
+    fixture.app.receipts.send(Arc::new(foreign)).unwrap();
+    fixture
+        .app
+        .receipts
+        .send(Arc::new(receipt.clone()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = socket.next().await
+            else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            if value["type"] == "receipt" {
+                assert_eq!(value["commitment"], "confirmed");
+                assert_eq!(value["data"], serde_json::to_value(&receipt).unwrap());
+                break;
+            }
+        }
+    })
+    .await
+    .expect("only authenticated wallet receives receipt");
     socket.close(None).await.unwrap();
 }
 
