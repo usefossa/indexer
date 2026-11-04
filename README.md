@@ -1,1 +1,1 @@
-[Indexer Documentation](https://fossa.ag/docs/users/self-hosting)
+[Indexer Documentation](https://fossa.ag/docs/users/sh)

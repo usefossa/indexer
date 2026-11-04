@@ -2,7 +2,7 @@
 
 ## scope
 
-standalone protocol indexer and compatible client API. source, tests, and build settings live under `indexer/`. read [self-hosting documentation](https://fossa.ag/docs/users/self-hosting) before changing protocol or API behavior.
+standalone protocol indexer and compatible client API. source, tests, and build settings live under `indexer/`. read [self-hosting documentation](https://fossa.ag/docs/users/sh) before changing protocol or API behavior.
 
 ## workflow
 
