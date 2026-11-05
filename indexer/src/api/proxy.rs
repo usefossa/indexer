@@ -157,8 +157,10 @@ pub async fn rpc(
         "getAccountInfo"
             | "getMultipleAccounts"
             | "getLatestBlockhash"
+            | "isBlockhashValid"
             | "getSignatureStatuses"
             | "getBlockHeight"
+            | "getEpochInfo"
             | "getMinimumBalanceForRentExemption"
             | "getFeeForMessage"
             | "getGenesisHash"
@@ -180,6 +182,49 @@ pub async fn rpc(
         || body["params"].as_array().is_some_and(|p| p.len() > 3)
     {
         return Err(Error::bad("Invalid RPC request"));
+    }
+    if method == "isBlockhashValid" {
+        let params = body["params"].as_array().expect("validated params");
+        if !(1..=2).contains(&params.len())
+            || params[0]
+                .as_str()
+                .filter(|hash| hash.len() <= 44)
+                .and_then(|hash| protocol::pubkey(hash).ok())
+                .is_none()
+            || params.get(1).is_some_and(|options| {
+                options.as_object().is_none_or(|options| {
+                    options.iter().any(|(key, value)| match key.as_str() {
+                        "commitment" => !matches!(
+                            value.as_str(),
+                            Some("processed" | "confirmed" | "finalized")
+                        ),
+                        "minContextSlot" => value.as_u64().is_none(),
+                        _ => true,
+                    })
+                })
+            })
+        {
+            return Err(Error::bad("Invalid blockhash lookup"));
+        }
+    }
+    if method == "getEpochInfo" {
+        let params = body["params"].as_array().expect("validated params");
+        if params.len() > 1
+            || params.first().is_some_and(|options| {
+                options.as_object().is_none_or(|options| {
+                    options.iter().any(|(key, value)| match key.as_str() {
+                        "commitment" => !matches!(
+                            value.as_str(),
+                            Some("processed" | "confirmed" | "finalized")
+                        ),
+                        "minContextSlot" => value.as_u64().is_none(),
+                        _ => true,
+                    })
+                })
+            })
+        {
+            return Err(Error::bad("Invalid epoch lookup"));
+        }
     }
     if method == "getMultipleAccounts" || method == "getSignatureStatuses" {
         let maximum = if method == "getMultipleAccounts" {

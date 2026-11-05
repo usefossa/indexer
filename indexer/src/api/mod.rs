@@ -9,13 +9,14 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, time::Duration};
 
@@ -61,7 +62,7 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 async fn guard(State(app): State<App>, request: Request, next: Next) -> Response {
-    let _permit = match app.http_requests.clone().try_acquire_owned() {
+    let permit = match app.http_requests.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => return Error(StatusCode::TOO_MANY_REQUESTS, "Server busy").into_response(),
     };
@@ -108,7 +109,17 @@ async fn guard(State(app): State<App>, request: Request, next: Next) -> Response
             header::HeaderValue::from_static("no-store"),
         );
     }
-    response
+    response.map(|body| {
+        Body::from_stream(stream::try_unfold(
+            (body.into_data_stream(), permit),
+            |(mut body, permit)| async move {
+                body.next()
+                    .await
+                    .map(|chunk| chunk.map(|chunk| (chunk, (body, permit))))
+                    .transpose()
+            },
+        ))
+    })
 }
 async fn health(State(app): State<App>) -> impl IntoResponse {
     let ready = app.index.ready(&app.config).await;

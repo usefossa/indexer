@@ -175,6 +175,65 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn finalized_epoch_proofs_require_auth_and_bounded_context_options() {
+    let fixture = Fixture::new().await;
+    let valid = json!({"jsonrpc":"2.0","id":1,"method":"getEpochInfo","params":[{"commitment":"finalized","minContextSlot":10}]});
+    assert_eq!(
+        fixture.request(&valid, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fixture.request(&valid, true).await.0, StatusCode::OK);
+    for params in [
+        json!([{"commitment":"root"}]),
+        json!([{"minContextSlot":-1}]),
+        json!([{"encoding":"base64"}]),
+        json!([null]),
+        json!([{}, {}]),
+    ] {
+        let mut body = valid.clone();
+        body["params"] = params;
+        assert_eq!(
+            fixture.request(&body, true).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(*fixture.requests.lock().unwrap(), vec![valid]);
+}
+
+#[tokio::test]
+async fn blockhash_expiry_proofs_require_auth_and_validate_hash_and_options() {
+    let fixture = Fixture::new().await;
+    let hash = fixture.app.config.market.to_string();
+    let valid = json!({"jsonrpc":"2.0","id":1,"method":"isBlockhashValid","params":[hash,{"commitment":"finalized","minContextSlot":10}]});
+    assert_eq!(
+        fixture.request(&valid, false).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for params in [
+        json!([]),
+        json!(["invalid"]),
+        json!(["a".repeat(100)]),
+        json!([hash, null]),
+        json!([hash, {"commitment":"root"}]),
+        json!([hash, {"minContextSlot":-1}]),
+        json!([hash, {"minContextSlot":1.5}]),
+        json!([hash, {"encoding":"base64"}]),
+        json!([hash, {}, {}]),
+    ] {
+        let mut body = valid.clone();
+        body["params"] = params;
+        assert_eq!(
+            fixture.request(&body, true).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert!(fixture.requests.lock().unwrap().is_empty());
+    fixture.app.index.connected(false).await;
+    assert_eq!(fixture.request(&valid, true).await.0, StatusCode::OK);
+    assert_eq!(*fixture.requests.lock().unwrap(), vec![valid]);
+}
+
+#[tokio::test]
 async fn native_legacy_and_v0_messages_relay_exact_bytes_without_lookup_round_trips() {
     let fixture = Fixture::new().await;
     for versioned in [false, true] {

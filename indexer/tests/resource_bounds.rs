@@ -1,5 +1,11 @@
 mod common;
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    extract::State,
+    http::{Request, StatusCode},
+    routing::post,
+};
 use fossa_indexer::{
     App,
     auth::{Connections, Session},
@@ -13,6 +19,54 @@ use std::{
     },
     time::Duration,
 };
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn http_capacity_is_held_until_receipt_stream_finishes_or_disconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(common::config(dir.path())).await.unwrap();
+    let token = "a".repeat(64);
+    let hash = fossa_indexer::auth::digest(&token);
+    app.db
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO sessions VALUES(?1,'synthetic',0,'wallet','lane',?2)",
+                rusqlite::params![hash, fossa_indexer::now() + 3600],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let _occupied = app
+        .http_requests
+        .clone()
+        .acquire_many_owned(255)
+        .await
+        .unwrap();
+    let router = fossa_indexer::api::router(app.clone());
+    let request = || {
+        Request::get("/v1/opencode/receipts")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.http_requests.available_permits(), 0);
+    let rejected = router.clone().oneshot(request()).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["receipts"],
+        json!([])
+    );
+    assert_eq!(app.http_requests.available_permits(), 1);
+    let response = router.oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.http_requests.available_permits(), 0);
+    drop(response);
+    assert_eq!(app.http_requests.available_permits(), 1);
+}
 
 #[test]
 fn socket_limits_bound_wallets_and_real_peers_without_collapsing_proxied_users() {
