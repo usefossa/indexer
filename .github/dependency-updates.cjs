@@ -14,7 +14,7 @@ module.exports = async function maintain({ github, context, core, workflow = "",
     if (!checks.some(check => check.name === "ci" && check.app?.id === 15368 && check.conclusion === "success") || checks.some(check => check.status !== "completed" || !["success", "skipped", "neutral"].includes(check.conclusion))) continue;
     if (status.data.statuses.length && status.data.state !== "success") continue;
     const review = reviews.findLast(review => review.user.id === 175728472 && review.commit_id === pull.head.sha);
-    if (!review || !["COMMENTED", "APPROVED"].includes(review.state)) continue;
+    if (!review || !["COMMENTED", "APPROVED"].includes(review.state) || !/<!-- ccr-overview-v2 -->|## (?:(?:pull request|pr) overview|overview)|\bcopilot reviewed\b/i.test(review.body || "")) continue;
     const current = (await github.rest.pulls.get(request)).data;
     if (current.state !== "open" || current.head.sha !== pull.head.sha || current.base.ref !== "main") continue;
     let merged;
