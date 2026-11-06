@@ -1,0 +1,41 @@
+name: fast ci
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: check automation and select relevant checks
+        id: scope
+        run: |
+          node --test .github/*.test.mjs
+          if git diff --name-only HEAD^ HEAD | grep -Ev '^(\.github/|AGENTS\.md$|README\.md$|.*\.md$)' >/dev/null; then echo 'code=true' >> "$GITHUB_OUTPUT"; fi
+      - name: select compiler
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup override set 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.scope.outputs.code == 'true'
+        with:
+          workspaces: |
+            indexer -> target
+          cache-on-failure: 'true'
+      - name: test affected application
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          cargo test --manifest-path indexer/Cargo.toml --locked
