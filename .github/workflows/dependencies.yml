@@ -1,7 +1,7 @@
 name: security maintenance
 on:
   workflow_run:
-    workflows: ['fast ci', 'pr review']
+    workflows: ['fast ci', 'pr review', 'Copilot', 'Running Copilot Code Review']
     types: [completed]
   workflow_dispatch:
 permissions:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   merge:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.actor.login == 'dependabot[bot]' || github.event.workflow_run.name == 'pr review')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && (github.event.workflow_run.actor.login == 'dependabot[bot]' || github.event.workflow_run.name == 'pr review' || github.event.workflow_run.actor.id == 175728472)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
