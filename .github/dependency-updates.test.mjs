@@ -59,3 +59,11 @@ test("completed current-format copilot reviews authorize checked security update
     assert.equal(calls.length, 2);
   }
 });
+
+test("zero-file reviews cannot authorize automatic merging", async () => {
+  for (const summary of ["Copilot reviewed 0 out of 5 changed files in this pull request and generated no comments.", "Copilot reviewed **0** out of **5** changed files.", "No files were reviewed."]) {
+    const { calls, input } = fixture({ reviewBody: `## Pull request overview\n${summary}` });
+    assert.equal(await maintain(input), undefined);
+    assert.equal(calls.length, 0);
+  }
+});
