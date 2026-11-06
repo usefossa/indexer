@@ -51,3 +51,9 @@ test("copilot quota, eligibility and failed-review notices cannot authorize merg
     assert.equal(calls.length, 0);
   }
 });
+
+test("completed current-format copilot reviews authorize checked security updates", async () => {
+  const { calls, input } = fixture({ reviewBody: "<!-- ccr-overview-v2 -->\n\n### Approved\n\nNo active review issues remain.", reviewState: "APPROVED" });
+  assert.equal(await maintain(input), 1);
+  assert.equal(calls.length, 2);
+});
