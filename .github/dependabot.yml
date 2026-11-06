@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /indexer
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 0
+    labels: [security]
+    groups:
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
