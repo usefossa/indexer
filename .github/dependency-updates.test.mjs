@@ -3,16 +3,16 @@ import assert from "node:assert/strict";
 import maintain from "./dependency-updates.cjs";
 
 function fixture(options = {}) {
-  const state = { actor: "dependabot[bot]", source: "usefossa/backend", security: true, file: "Cargo.lock", ci: "success", status: "success", head: "abc", reviewed: true, reviewHead: "abc", reviewState: "COMMENTED", reviewBody: "## Pull request overview\nCopilot reviewed all changed files.", ...options };
+  const state = { actor: "dependabot[bot]", source: "usefossa/backend", security: true, file: "Cargo.lock", ci: "success", status: "success", head: "abc", reviewed: true, reviewHead: "abc", reviewRun: { id: 1, head_sha: "abc", event: "dynamic", path: "dynamic/agents/copilot-pull-request-reviewer", actor: { id: 175728472 }, status: "completed", conclusion: "success" }, reviewState: "COMMENTED", reviewBody: "## Pull request overview\nCopilot reviewed all changed files.", ...options };
   const calls = [];
   const pull = { number: 1, labels: state.security ? [{ name: "security" }] : [], user: { login: state.actor }, head: { repo: { full_name: state.source }, ref: "dependabot/security", sha: "abc" } };
   const github = {
-    paginate: async route => ({ pulls: [pull], files: [{ filename: state.file }], checks: [{ name: "ci", app: { id: 15368 }, status: "completed", conclusion: state.ci }], reviews: state.reviewed ? [{ user: { id: 175728472, login: "Copilot" }, commit_id: state.reviewHead, state: state.reviewState, body: state.reviewBody }] : [] })[route],
+    paginate: async route => ({ reviewRuns: state.reviewRun ? [state.reviewRun] : [], pulls: [pull], files: [{ filename: state.file }], checks: [{ name: "ci", app: { id: 15368 }, status: "completed", conclusion: state.ci }], reviews: state.reviewed ? [{ user: { id: 175728472, login: "Copilot" }, commit_id: state.reviewHead, state: state.reviewState, body: state.reviewBody }] : [] })[route],
     rest: {
       pulls: { list: "pulls", listFiles: "files", listReviews: "reviews", get: async () => ({ data: { state: "open", head: { sha: state.head }, base: { ref: "main" } } }), merge: async args => { calls.push(args); if (state.error) throw Object.assign(new Error("blocked"), { status: state.error }); return { data: { merged: true } }; } },
       checks: { listForRef: "checks" },
       repos: { getCombinedStatusForRef: async () => ({ data: { state: state.status, statuses: [] } }) },
-      actions: { createWorkflowDispatch: async args => { calls.push(args); } },
+      actions: { listWorkflowRunsForRepo: "reviewRuns", createWorkflowDispatch: async args => { calls.push(args); } },
     },
   };
   return { calls, input: { github, context: { repo: { owner: "usefossa", repo: "backend" } }, core: { info() {}, notice() {} }, workflow: "deploy.yml" } };
@@ -63,6 +63,21 @@ test("completed current-format copilot reviews authorize checked security update
 test("zero-file reviews cannot authorize automatic merging", async () => {
   for (const summary of ["Copilot reviewed 0 out of 5 changed files in this pull request and generated no comments.", "Copilot reviewed **0** out of **5** changed files.", "No files were reviewed."]) {
     const { calls, input } = fixture({ reviewBody: `## Pull request overview\n${summary}` });
+    assert.equal(await maintain(input), undefined);
+    assert.equal(calls.length, 0);
+  }
+});
+
+for (const change of [null, { head_sha: "old" }, { event: "push" }, { path: ".github/workflows/copilot.yml" }, { actor: { id: 1 } }, { status: "in_progress" }, { conclusion: "failure" }]) {
+  test(`only a successful native Copilot run on the reviewed SHA authorizes merging: ${JSON.stringify(change)}`, async () => {
+    const { input, calls } = fixture({ reviewRun: change === null ? null : { id: 1, head_sha: "abc", event: "dynamic", path: "dynamic/agents/copilot-pull-request-reviewer", actor: { id: 175728472 }, status: "completed", conclusion: "success", ...change } });
+    assert.equal(await maintain(input), undefined);
+    assert.equal(calls.length, 0);
+  });
+}
+test("overview headers cannot turn failed reviews into completed reviews", async () => {
+  for (const reviewBody of ["<!-- ccr-overview-v2 -->\nReview failed.", "## PR Overview\nCopilot was unable to review because of insufficient remaining quota."]) {
+    const { input, calls } = fixture({ reviewBody });
     assert.equal(await maintain(input), undefined);
     assert.equal(calls.length, 0);
   }
