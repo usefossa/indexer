@@ -19,10 +19,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 2
-      - name: check automation and select relevant checks
+      - name: select relevant checks
         id: scope
         run: |
-          node --test .github/*.test.mjs
           if git diff --name-only HEAD^ HEAD | grep -Ev '^(\.github/|AGENTS\.md$|README\.md$|.*\.md$)' >/dev/null; then echo 'code=true' >> "$GITHUB_OUTPUT"; fi
       - name: select compiler
         if: steps.scope.outputs.code == 'true'

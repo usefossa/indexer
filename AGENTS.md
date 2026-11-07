@@ -6,6 +6,7 @@ standalone protocol indexer and compatible client API. source, tests, and build 
 
 ## workflow
 
+- dependency updates and security fixes are manual; retain vulnerability alerts and dependency inventories.
 - read the relevant implementation before editing. clarify uncertain requirements and keep changes focused.
 - deployments and package publication require an explicit request. preserve unrelated local settings and durable indexed data.
 
