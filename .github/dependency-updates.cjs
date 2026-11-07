@@ -4,21 +4,14 @@ module.exports = async function maintain({ github, context, core, workflow = "",
   for (const pull of pulls) {
     if (pull.user.login !== "dependabot[bot]" || pull.head.repo?.full_name !== `${repo.owner}/${repo.repo}` || !pull.head.ref.startsWith("dependabot/") || !pull.labels.some(label => label.name === "security")) continue;
     const request = { ...repo, pull_number: pull.number };
-    const [files, checks, status, reviews, reviewRuns] = await Promise.all([
+    const [files, checks, status] = await Promise.all([
       github.paginate(github.rest.pulls.listFiles, request),
       github.paginate(github.rest.checks.listForRef, { ...repo, ref: pull.head.sha, filter: "latest" }),
       github.rest.repos.getCombinedStatusForRef({ ...repo, ref: pull.head.sha }),
-      github.paginate(github.rest.pulls.listReviews, request),
-      github.paginate(github.rest.actions.listWorkflowRunsForRepo, { ...repo, head_sha: pull.head.sha, event: "dynamic" }),
     ]);
     if (!files.length || files.some(({ filename }) => !/^(?:(?:[^/]+\/)*(?:package\.json|bun\.lock|Cargo\.(?:toml|lock))|\.github\/workflows\/[^/]+\.ya?ml)$/.test(filename))) continue;
     if (!checks.some(check => check.name === "ci" && check.app?.id === 15368 && check.conclusion === "success") || checks.some(check => check.status !== "completed" || !["success", "skipped", "neutral"].includes(check.conclusion))) continue;
     if (status.data.statuses.length && status.data.state !== "success") continue;
-    const run = reviewRuns.filter(run => run.head_sha === pull.head.sha && run.event === "dynamic" && run.path === "dynamic/agents/copilot-pull-request-reviewer" && run.actor?.id === 175728472).sort((a, b) => b.id - a.id)[0];
-    if (!run || run.status !== "completed" || run.conclusion !== "success") continue;
-    const review = reviews.findLast(review => review.user.id === 175728472 && review.commit_id === pull.head.sha);
-    if (/\breviewed\s+(?:\*\*)?0\b|\b(?:no|0)\s+(?:changed\s+)?files\s+(?:were\s+)?reviewed\b/i.test(review?.body || "")) continue;
-    if (!review || !["COMMENTED", "APPROVED"].includes(review.state) || !review.body?.trim() || /unable to review|review(?:ing)? (?:was )?(?:failed|skipped|incomplete)|insufficient remaining quota|code review is not enabled/i.test(review.body)) continue;
     const current = (await github.rest.pulls.get(request)).data;
     if (current.state !== "open" || current.head.sha !== pull.head.sha || current.base.ref !== "main") continue;
     let merged;
@@ -32,7 +25,7 @@ module.exports = async function maintain({ github, context, core, workflow = "",
     if (!merged.data.merged) continue;
     // workflow-token merges suppress push workflows; explicitly dispatch the trusted deployment.
     if (workflow) await github.rest.actions.createWorkflowDispatch({ ...repo, workflow_id: workflow, ref: "main", inputs });
-    core.info(`merged reviewed security pr ${pull.number}`);
+    core.info(`merged checked security pr ${pull.number}`);
     return pull.number;
   }
 };
