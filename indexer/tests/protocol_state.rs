@@ -430,7 +430,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     );
     let provider_doc =
         json!({"name":"Example","endpoint":"https://example.com/v1/chat/completions"});
-    let model_doc = json!({"id":"example/model","name":"Example Model","checkpoints":[{"id":"example/model@1017","name":"1017"},{"id":"example/model@unspecified","name":"Unspecified","ordered":false}],"modalities":{"input":["text"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
+    let model_doc = json!({"id":"example/model","name":"Example Model","imageTokensByCheckpoint":{"example/model@1017":73},"checkpoints":[{"id":"example/model@1017","name":"1017"},{"id":"example/model@unspecified","name":"Unspecified","ordered":false}],"modalities":{"input":["text","image"],"output":["text"]},"contextTokens":1000,"outputTokens":100});
     let id_hash = Sha256::digest(b"example/model");
     let (model, model_bump) = Pubkey::find_program_address(
         &[b"model", config.market.as_ref(), &id_hash],
@@ -572,6 +572,7 @@ async fn verified_catalog_requires_canonical_pdas_hash_books_and_provider_list()
     let offer = &catalog.value["models"][0]["offers"][0];
     assert_eq!(offer["checkpointName"], "1017");
     assert_eq!(offer["checkpointId"], "example/model@1017");
+    assert_eq!(offer["maxImageTokens"], 73);
     assert_eq!(offer["contextTokens"], 1000);
     assert_eq!(offer["inputBoundTokens"], 900);
     assert_eq!(offer["outputTokens"], 100);

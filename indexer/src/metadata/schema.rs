@@ -102,6 +102,22 @@ pub fn validate(kind: Kind, value: &Value) -> Result<(), String> {
                 return Err("Invalid model metadata: duplicate checkpoint id".into());
             }
         }
+        if let Some(limits) = value
+            .get("imageTokensByCheckpoint")
+            .and_then(Value::as_object)
+        {
+            let vision = value["modalities"]["input"]
+                .as_array()
+                .is_some_and(|inputs| inputs.iter().any(|v| v == "image"));
+            for (checkpoint, limit) in limits {
+                if !vision
+                    || !checkpoint_ids.contains(checkpoint.as_str())
+                    || number(limit) > number(&value["contextTokens"])
+                {
+                    return Err("Invalid model metadata: image bounds require a declared checkpoint, image input and sufficient context".into());
+                }
+            }
+        }
         let mut ids = HashSet::new();
         for variant in value
             .get("variants")
@@ -139,6 +155,14 @@ pub fn parse(kind: Kind, bytes: &[u8]) -> Result<Value, String> {
     validate(kind, &value)?;
     // json schema integers include 1.0; normalize parsed counters without changing committed bytes.
     if matches!(kind, Kind::Model) {
+        if let Some(limits) = value
+            .get_mut("imageTokensByCheckpoint")
+            .and_then(Value::as_object_mut)
+        {
+            for limit in limits.values_mut() {
+                *limit = number(limit).into();
+            }
+        }
         for field in ["contextTokens", "outputTokens", "inputBoundTokens"] {
             if let Some(value) = value.get_mut(field) {
                 *value = number(value).into();
