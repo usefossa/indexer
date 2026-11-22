@@ -306,6 +306,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 && active < capacity;
             offers.push(json!({
                 "checkpoint": hex::encode(checkpoint),
+                "maxImageTokens": revision["id"].as_str().and_then(|id| doc["imageTokensByCheckpoint"].get(id)),
                 "checkpointId": revision["id"], "checkpointName": revision["name"],
                 "checkpointOrder": checkpoint_order,
                 "inputModalities": input_modalities, "outputModalities": output_modalities,
