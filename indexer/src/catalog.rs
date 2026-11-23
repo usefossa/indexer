@@ -1,3 +1,4 @@
+pub(crate) mod view;
 use crate::{
     config::Config,
     index::State,
@@ -14,6 +15,7 @@ pub struct Catalog {
     pub source_ready: bool,
     pub directory: std::sync::Arc<crate::profiles::Directory>,
     pub value: Value,
+    pub directory_view: std::sync::OnceLock<Bytes>,
     pub body: Bytes,
     pub message: Utf8Bytes,
 }
@@ -306,6 +308,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
                 && active < capacity;
             offers.push(json!({
                 "checkpoint": hex::encode(checkpoint),
+                "textCounter": revision.get("textCounter"),
                 "maxImageTokens": revision["id"].as_str().and_then(|id| doc["imageTokensByCheckpoint"].get(id)),
                 "checkpointId": revision["id"], "checkpointName": revision["name"],
                 "checkpointOrder": checkpoint_order,
@@ -349,6 +352,7 @@ pub fn build(index: &State, config: &Config) -> Catalog {
     Catalog {
         ready,
         source_ready,
+        directory_view: Default::default(),
         directory,
         value,
         body,

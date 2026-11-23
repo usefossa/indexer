@@ -107,8 +107,18 @@ async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<(
     let mut watched = HashMap::new();
     let mut input_count = 0usize;
     let mut input_window = Instant::now();
+    let compact = headers
+        .get("x-fossa-catalog")
+        .is_some_and(|value| value == "directory");
+    let catalog_message = |catalog: &crate::catalog::Catalog| {
+        if compact {
+            r#"{"type":"catalogChanged"}"#.into()
+        } else {
+            catalog.message.clone()
+        }
+    };
     let mut last_catalog = app.index.catalog(&app.config).await;
-    send(&mut socket, last_catalog.message.clone()).await?;
+    send(&mut socket, catalog_message(&last_catalog)).await?;
     send(&mut socket, json!({"type":"resync"}).to_string().into()).await?;
     send(
         &mut socket,
@@ -151,12 +161,12 @@ async fn stream(app: App, headers: HeaderMap, mut socket: WebSocket) -> Result<(
                 None|Some(Err(_))|Some(Ok(Message::Close(_)))=>return Ok(()),_=>{}
                 }
             },
-            change=changes.changed()=>{if change.is_err(){return Ok(());}let catalog=app.index.catalog(&app.config).await;if !std::sync::Arc::ptr_eq(&catalog,&last_catalog){send(&mut socket,catalog.message.clone()).await?;last_catalog=catalog;}watches(&app,&mut socket,&mut watched).await?;},
+            change=changes.changed()=>{if change.is_err(){return Ok(());}let catalog=app.index.catalog(&app.config).await;if !std::sync::Arc::ptr_eq(&catalog,&last_catalog){send(&mut socket,catalog_message(&catalog)).await?;last_catalog=catalog;}watches(&app,&mut socket,&mut watched).await?;},
             change=quotes.changed()=>{if change.is_err(){return Ok(());}let value=quotes.borrow_and_update().clone();send(&mut socket,json!({"type":"chain","data":value}).to_string().into()).await?;},
             _=ticker.tick()=>{
                 let session=auth::session(&app,&headers).await?;
                 let catalog=app.index.catalog(&app.config).await;
-                send(&mut socket,catalog.message.clone()).await?;last_catalog=catalog;
+                send(&mut socket,catalog_message(&catalog)).await?;last_catalog=catalog;
                 if !last_catalog.ready {send(&mut socket,json!({"type":"chain","data":null}).to_string().into()).await?;}
                 if snapshots.is_empty(){let app=app.clone();snapshots.spawn(async move {wallet::snapshot(&app,&session).await});}
                 watches(&app,&mut socket,&mut watched).await?;start_fallback(&app,&watched,&mut fallbacks).await;
