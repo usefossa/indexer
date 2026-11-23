@@ -140,11 +140,34 @@ async fn config(State(app): State<App>) -> Json<Value> {
         json!({"programId":app.config.program.to_string(),"market":app.config.market.to_string(),"providerList":app.config.provider_list.to_string(),"providerLimitLookupTables":app.config.provider_limit_lookup_tables.iter().map(ToString::to_string).collect::<Vec<_>>(),"usdcMint":app.config.mint.to_string(),"solanaRpc":format!("{}/v1/opencode/rpc",app.config.public_url),"liveUrl":format!("{}/v1/opencode/live",app.config.public_url.replacen("http","ws",1)),"opencode":{"siteUrl":app.config.public_url,"deviceTtlSecs":120,"maxInputTokens":4_194_304,"maxRequestBytes":16_777_216,"catalogMaxAgeMs":10_000,"requestTimeoutMs":180_000,"pollIntervalMs":1000,"mainnetGenesisHash":app.config.genesis,"localBookingPoolSize":2,"manualImport":true,"deviceConnect":false}}),
     )
 }
-async fn catalog(State(app): State<App>) -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        app.index.catalog(&app.config).await.body.clone(),
-    )
+#[derive(serde::Deserialize, Default)]
+struct CatalogQuery {
+    view: Option<String>,
+    model: Option<String>,
+}
+
+async fn catalog(
+    State(app): State<App>,
+    axum::extract::Query(query): axum::extract::Query<CatalogQuery>,
+) -> impl IntoResponse {
+    let catalog = app.index.catalog(&app.config).await;
+    let body = if let Some(id) = query.model {
+        crate::catalog::view::project(&catalog.value, Some(&id))
+            .to_string()
+            .into()
+    } else if query.view.as_deref() == Some("directory") {
+        catalog
+            .directory_view
+            .get_or_init(|| {
+                crate::catalog::view::project(&catalog.value, None)
+                    .to_string()
+                    .into()
+            })
+            .clone()
+    } else {
+        catalog.body.clone()
+    };
+    ([(header::CONTENT_TYPE, "application/json")], body)
 }
 async fn document(State(app): State<App>, Path(hash): Path<String>) -> Result<impl IntoResponse> {
     let raw = metadata::document(&app, &hash).await?;
